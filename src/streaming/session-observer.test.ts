@@ -187,6 +187,29 @@ describe("SessionObserver", () => {
     expect(card.elements?.[0]?.content).toBe("Hello from TUI")
   })
 
+  it("updates chatId on re-observe without adding a duplicate listener", () => {
+    const deps = makeDeps()
+    const observer = createSessionObserver(deps)
+    observer.observe("ses-1", "chat-a")
+    observer.observe("ses-1", "chat-b")
+
+    expect(deps.addListener).toHaveBeenCalledTimes(1)
+    expect(observer.getChatForSession("ses-1")).toBe("chat-b")
+
+    const listener = deps.capturedListeners.get("ses-1")!
+    listener(textDeltaEvent("ses-1", "msg-delayed", "Delayed response"))
+    listener(sessionIdleEvent("ses-1"))
+
+    expect(deps.feishuClient.sendMessage).toHaveBeenCalledWith(
+      "chat-b",
+      expect.objectContaining({ msg_type: "interactive" }),
+    )
+    expect(deps.feishuClient.sendMessage).not.toHaveBeenCalledWith(
+      "chat-a",
+      expect.anything(),
+    )
+  })
+
   it("ignores events for owned messageIDs (markOwned)", () => {
     const deps = makeDeps()
     const observer = createSessionObserver(deps)

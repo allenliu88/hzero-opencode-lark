@@ -110,7 +110,12 @@ export function createSessionObserver(
 
   return {
     observe(sessionId: string, chatId: string): void {
-      if (observedSessions.has(sessionId)) return
+      const existing = observedSessions.get(sessionId)
+      if (existing) {
+        observedSessions.set(sessionId, { ...existing, chatId })
+        logger.info(`Updated observed session ${sessionId} to chat ${chatId}`)
+        return
+      }
       const listener = (rawEvent: unknown): void => {
         const action = eventProcessor.processEvent(rawEvent)
         if (!action) return
@@ -123,6 +128,8 @@ export function createSessionObserver(
         // Skip events belonging to Feishu-initiated messages
         if (messageId && knownMessageIds.has(messageId)) return
 
+        const currentChatId = observedSessions.get(action.sessionId)?.chatId ?? chatId
+
         switch (action.type) {
           case "TextDelta": {
             if (!messageId) break
@@ -132,7 +139,7 @@ export function createSessionObserver(
             break
           }
           case "SessionIdle": {
-            flushBuffers(chatId)
+            flushBuffers(currentChatId)
             break
           }
           case "QuestionAsked": {
@@ -141,10 +148,10 @@ export function createSessionObserver(
             if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("question", action.requestId)) {
               break
             }
-            logger.info(`Question event received in observer for chat ${chatId}, requestId=${action.requestId}`)
+            logger.info(`Question event received in observer for chat ${currentChatId}, requestId=${action.requestId}`)
             const questionCard = buildQuestionCard(action)
             feishuClient
-              .sendMessage(chatId, {
+              .sendMessage(currentChatId, {
                 msg_type: "interactive",
                 content: JSON.stringify(questionCard),
               })
@@ -158,7 +165,7 @@ export function createSessionObserver(
                 deps.interactiveCardRegistry?.track({
                   requestId: action.requestId,
                   kind: "question",
-                  chatId,
+                  chatId: currentChatId,
                   messageId,
                 })
               })
@@ -174,10 +181,10 @@ export function createSessionObserver(
             if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("permission", action.requestId)) {
               break
             }
-            logger.info(`Permission event received in observer for chat ${chatId}, requestId=${action.requestId}`)
+            logger.info(`Permission event received in observer for chat ${currentChatId}, requestId=${action.requestId}`)
             const permissionCard = buildPermissionCard(action)
             feishuClient
-              .sendMessage(chatId, {
+              .sendMessage(currentChatId, {
                 msg_type: "interactive",
                 content: JSON.stringify(permissionCard),
               })
@@ -191,7 +198,7 @@ export function createSessionObserver(
                 deps.interactiveCardRegistry?.track({
                   requestId: action.requestId,
                   kind: "permission",
-                  chatId,
+                  chatId: currentChatId,
                   messageId,
                 })
               })
