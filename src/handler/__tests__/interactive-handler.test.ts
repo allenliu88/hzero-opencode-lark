@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { createInteractiveHandler } from "../interactive-handler.js"
-import { createMockLogger } from "../../__tests__/setup.js"
+import { createMockFeishuClient, createMockLogger } from "../../__tests__/setup.js"
 import type { FeishuCardAction } from "../../types.js"
+import { createEmbeddedInteractionRegistry } from "../../feishu/embedded-interaction-registry.js"
 
 function createMockInteractiveCardRegistry() {
   return {
@@ -33,9 +34,12 @@ describe("createInteractiveHandler", () => {
 
   describe("question_answer action", () => {
     it("successfully answers a question with correct POST request", async () => {
+      const feishuClient = createMockFeishuClient()
+      vi.mocked(feishuClient.deleteMessage).mockResolvedValue({ code: 0, msg: "ok" })
       const handler = createInteractiveHandler({
         serverUrl: "http://test:4096",
         logger: mockLogger,
+        feishuClient,
         interactiveCardRegistry: mockInteractiveCardRegistry,
       })
 
@@ -75,6 +79,107 @@ describe("createInteractiveHandler", () => {
       )
       expect(mockInteractiveCardRegistry.markFeishuResolving).toHaveBeenCalledWith("question", "req-123")
       expect(mockInteractiveCardRegistry.untrack).toHaveBeenCalledWith("question", "req-123")
+      expect(feishuClient.deleteMessage).toHaveBeenCalledWith("msg-1")
+    })
+
+    it("resolves an embedded question without deleting the main card", async () => {
+      const feishuClient = createMockFeishuClient()
+      const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
+      const resolve = vi.fn().mockResolvedValue(undefined)
+      embeddedInteractionRegistry.register({ requestId: "req-123", kind: "question", resolve })
+      const handler = createInteractiveHandler({
+        serverUrl: "http://test:4096",
+        logger: mockLogger,
+        feishuClient,
+        embeddedInteractionRegistry,
+      })
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" })
+
+      await handler({
+        action: { tag: "button", value: {
+          action: "question_answer",
+          requestId: "req-123",
+          answers: JSON.stringify([["继续"]]),
+          embedded: "true",
+        } },
+        open_message_id: "msg-main",
+        open_chat_id: "chat-1",
+        operator: { open_id: "ou-1" },
+      })
+
+      expect(resolve).toHaveBeenCalledWith(["继续"])
+      expect(feishuClient.deleteMessage).not.toHaveBeenCalled()
+      expect(embeddedInteractionRegistry.get("question", "req-123")).toBeUndefined()
+    })
+
+    it("submits multiple form selections as one question answer", async () => {
+      const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
+      const resolve = vi.fn().mockResolvedValue(undefined)
+      embeddedInteractionRegistry.register({ requestId: "req-multi", kind: "question", resolve })
+      const handler = createInteractiveHandler({
+        serverUrl: "http://test:4096",
+        logger: mockLogger,
+        embeddedInteractionRegistry,
+      })
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, statusText: "OK" })
+
+      await handler({
+        action: {
+          tag: "button",
+          value: {
+            action: "question_answer",
+            requestId: "req-multi",
+            embedded: "true",
+            multiple: "true",
+            optionLabels: JSON.stringify(["技术约束", "实现方案"]),
+          },
+          form_value: { question_choice_0: true, question_choice_1: "true" },
+        },
+        open_message_id: "msg-main",
+        open_chat_id: "chat-1",
+        operator: { open_id: "ou-1" },
+      })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://test:4096/question/req-multi/reply",
+        expect.objectContaining({
+          body: JSON.stringify({ answers: [["技术约束", "实现方案"]] }),
+        }),
+      )
+      expect(resolve).toHaveBeenCalledWith(["技术约束", "实现方案"])
+    })
+
+    it("submits a repeated multi-select callback only once", async () => {
+      const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
+      const resolve = vi.fn().mockResolvedValue(undefined)
+      embeddedInteractionRegistry.register({ requestId: "req-repeat", kind: "question", resolve })
+      const handler = createInteractiveHandler({
+        serverUrl: "http://test:4096",
+        logger: mockLogger,
+        embeddedInteractionRegistry,
+      })
+      mockFetch.mockResolvedValue({ ok: true, status: 200, statusText: "OK" })
+      const action: FeishuCardAction = {
+        action: {
+          tag: "button",
+          value: {
+            action: "question_answer",
+            requestId: "req-repeat",
+            embedded: "true",
+            multiple: "true",
+            optionLabels: JSON.stringify(["技术约束", "实现方案"]),
+          },
+          form_value: { question_choice_0: true, question_choice_1: true },
+        },
+        open_message_id: "msg-main",
+        open_chat_id: "chat-1",
+        operator: { open_id: "ou-1" },
+      }
+
+      await Promise.all([handler(action), handler(action)])
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+      expect(resolve).toHaveBeenCalledTimes(1)
     })
 
     it("logs warn when requestId is missing", async () => {

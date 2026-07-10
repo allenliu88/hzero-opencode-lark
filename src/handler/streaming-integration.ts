@@ -7,10 +7,11 @@ import type { EventProcessor } from "../streaming/event-processor.js"
 import type { QuestionAsked, PermissionRequested } from "../streaming/event-processor.js"
 import type { EventListenerMap } from "../utils/event-listeners.js"
 import { addListener, removeListener } from "../utils/event-listeners.js"
-import { StreamingCardSession } from "../streaming/streaming-card.js"
+import { AgentConsoleSession, ANSWER_ELEMENT_MAX_BYTES } from "../streaming/agent-console.js"
 import type { OutboundMediaHandler } from "./outbound-media.js"
 import type { ExpiringSet } from "../utils/expiring-set.js"
 import type { InteractiveCardRegistry } from "../feishu/interactive-card-registry.js"
+import type { EmbeddedInteractionRegistry } from "../feishu/embedded-interaction-registry.js"
 import {
   extractFeishuMessageId,
   interactiveCardKey,
@@ -19,13 +20,21 @@ import {
 // ── Types ──
 
 export interface StreamingBridgeDeps {
+  serverUrl?: string
   cardkitClient: CardKitClient
   feishuClient: FeishuApiClient
   subAgentTracker: SubAgentTracker
   logger: Logger
   seenInteractiveIds: ExpiringSet<string>
   interactiveCardRegistry?: InteractiveCardRegistry
+  embeddedInteractionRegistry?: EmbeddedInteractionRegistry
+  activeSessions?: Set<string>
   outboundMedia?: OutboundMediaHandler
+  inactivityTimeoutMs?: number
+  waitingInactivityTimeoutMs?: number
+  maxLifetimeMs?: number
+  cardCloseTimeoutMs?: number
+  cardCreationDelayMs?: number
 }
 
 export interface StreamingBridge {
@@ -41,10 +50,22 @@ export interface StreamingBridge {
   ): Promise<void>
 }
 
+export class SessionBusyError extends Error {
+  constructor(public readonly sessionId: string) {
+    super(`Session ${sessionId} is busy`)
+    this.name = "SessionBusyError"
+  }
+}
+
 // ── Constants ──
 
 
 const FIRST_EVENT_TIMEOUT_MS = 5 * 60 * 1_000 // 5 minutes — long tasks may take minutes before first SSE event
+const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+const WAITING_INACTIVITY_TIMEOUT_MS = 60 * 60 * 1_000
+const MAX_LIFETIME_MS = 2 * 60 * 60 * 1_000
+const CARD_CLOSE_TIMEOUT_MS = 3_000
+const CARD_CREATION_DELAY_MS = 500
 
 // ── Factory ──
 
@@ -52,6 +73,7 @@ export function createStreamingBridge(
   deps: StreamingBridgeDeps,
 ): StreamingBridge {
   const { cardkitClient, feishuClient, subAgentTracker, logger, seenInteractiveIds } = deps
+  const sessionTails = new Map<string, Promise<void>>()
 
   return {
     async handleMessage(
@@ -64,28 +86,59 @@ export function createStreamingBridge(
       messageId: string,
       reactionId: string | null,
     ): Promise<void> {
-      let card: StreamingCardSession | null = null
+      const previous = sessionTails.get(sessionId) ?? Promise.resolve()
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const tail = previous.catch(() => {}).then(() => gate)
+      sessionTails.set(sessionId, tail)
+      await previous.catch(() => {})
+
+      if (deps.serverUrl && await isSessionBusy(deps.serverUrl, sessionId, logger)) {
+        release()
+        if (sessionTails.get(sessionId) === tail) sessionTails.delete(sessionId)
+        throw new SessionBusyError(sessionId)
+      }
+      deps.activeSessions?.add(sessionId)
+
+      let card: AgentConsoleSession | null = null
       let cardStartPromise: Promise<void> | null = null
 
-      const ensureCard = (): void => {
-        if (card || cardStartPromise) return
-        card = new StreamingCardSession({
+      const ensureCard = (): Promise<void> => {
+        if (cardStartPromise) return cardStartPromise
+        card = new AgentConsoleSession({
           cardkitClient,
           feishuClient,
           chatId,
         })
-        cardStartPromise = card.start().then(() => {
-          logger.info(
-            `Streaming card started for session ${sessionId} in chat ${chatId}`,
-          )
-        })
+        cardStartPromise = card.start()
+          .then(() => {
+            logger.info(
+              `Streaming card started for session ${sessionId} in chat ${chatId}`,
+            )
+          })
+          .catch((err) => {
+            card = null
+            cardStartPromise = null
+            throw err
+          })
+        return cardStartPromise
       }
 
-      return new Promise<void>((resolve, reject) => {
-        let textBuffer = ""
+      try {
+        return await new Promise<void>((resolve, reject) => {
+        let boundMessageId: string | null = null
+        const textParts = new Map<string, string>()
+        const textPartSources = new Map<string, "delta" | "snapshot">()
+        let postCompleted = false
         let gotFirstEvent = false
         let settled = false
         let syncResponseBody = ""
+        let waitingForUser = false
+        let inactivityTimer: ReturnType<typeof setTimeout> | null = null
+        let cardCreationTimer: ReturnType<typeof setTimeout> | null = null
+        const getResponseText = (): string => stripThinkingContent([...textParts.values()].join("")).trim()
         const sendFinalResponse = async (text: string): Promise<void> => {
           const card = buildFinalResponseCard(text)
           await feishuClient.replyMessage(messageId, {
@@ -101,19 +154,119 @@ export function createStreamingBridge(
           }
         }
 
+        const clearTimers = (): void => {
+          clearTimeout(firstEventTimer)
+          clearTimeout(absoluteTimer)
+          if (inactivityTimer) clearTimeout(inactivityTimer)
+          if (cardCreationTimer) clearTimeout(cardCreationTimer)
+        }
+
+        const closeCard = async (text: string, reason?: string): Promise<boolean> => {
+          if (!card) return false
+          try {
+            await withTimeout(
+              (cardStartPromise ?? Promise.resolve()).then(() => card!.close(
+                reason
+                  ? { status: "error", reason, finalAnswer: text }
+                  : { finalAnswer: text },
+              )),
+              deps.cardCloseTimeoutMs ?? CARD_CLOSE_TIMEOUT_MS,
+              "card.close() timed out",
+            )
+            return true
+          } catch (err) {
+            logger.warn(`card.close() failed: ${err}`)
+            return false
+          }
+        }
+
+        const complete = async (text: string, closeReason?: string): Promise<void> => {
+          clearTimers()
+          removeListener(eventListeners, sessionId, myListener)
+          const cardCompleted = await closeCard(text, closeReason)
+          if (!cardCompleted || Buffer.byteLength(text, "utf8") > ANSWER_ELEMENT_MAX_BYTES) {
+            try {
+              await sendFinalResponse(text)
+            } catch (err) {
+              logger.warn(`sendFinalResponse failed: ${err}`)
+            }
+          } else if (reactionId) {
+            try {
+              await feishuClient.deleteReaction(messageId, reactionId)
+            } catch (err) {
+              logger.warn(`deleteReaction failed: ${err}`)
+            }
+          }
+          if (deps.outboundMedia) {
+            try {
+              await deps.outboundMedia.sendDetectedFiles(chatId, text)
+            } catch (err) {
+              logger.warn(`outboundMedia.sendDetectedFiles failed: ${err}`)
+            }
+          }
+          onComplete(text)
+          resolve()
+        }
+
+        const handleLifecycleTimeout = (reason: string): void => {
+          if (settled) return
+          settled = true
+          const responseText = getResponseText() || parseSyncResponse(syncResponseBody, logger)
+          logger.warn(`${reason} for session ${sessionId}`)
+          void complete(responseText, reason)
+        }
+
+        const resetInactivityTimer = (): void => {
+          if (inactivityTimer) clearTimeout(inactivityTimer)
+          inactivityTimer = setTimeout(() => {
+            handleLifecycleTimeout("OpenCode event stream became inactive")
+          }, waitingForUser
+            ? (deps.waitingInactivityTimeoutMs ?? WAITING_INACTIVITY_TIMEOUT_MS)
+            : (deps.inactivityTimeoutMs ?? INACTIVITY_TIMEOUT_MS))
+          inactivityTimer.unref?.()
+        }
+
         // Named listener reference — stored for removeListener calls
         const myListener = (rawEvent: unknown): void => {
           const action = eventProcessor.processEvent(rawEvent)
           if (!action) return
           if (action.sessionId !== sessionId) return
 
-          gotFirstEvent = true
+          if (!gotFirstEvent) {
+            gotFirstEvent = true
+            clearTimeout(firstEventTimer)
+          }
+          waitingForUser = action.type === "QuestionAsked" || action.type === "PermissionRequested"
+          resetInactivityTimer()
 
           switch (action.type) {
             case "TextDelta": {
-              textBuffer += action.text
-              if (textBuffer.length > 102_400) {
-                textBuffer = textBuffer.slice(0, 102_400) + "\n\n…(内容过长，已截断)"
+              if (boundMessageId === null) {
+                boundMessageId = action.messageId
+              }
+              if (action.messageId !== boundMessageId) {
+                logger.debug(`Ignoring text for unrelated message ${action.messageId} in session ${sessionId}`)
+                break
+              }
+              const current = textParts.get(action.partId) ?? ""
+              if (
+                action.source === "delta" &&
+                textPartSources.get(action.partId) === "snapshot" &&
+                current.endsWith(action.text)
+              ) {
+                textPartSources.set(action.partId, "delta")
+                break
+              }
+              textParts.set(
+                action.partId,
+                truncateResponseText(action.source === "snapshot" ? action.text : current + action.text),
+              )
+              textPartSources.set(action.partId, action.source)
+              const responseText = getResponseText()
+              if (cardStartPromise) {
+                cardStartPromise
+                  .then(() => card!.setAnswerText(responseText))
+                  .catch((err) => logger.warn(`stream answer update failed: ${err}`))
               }
               break
             }
@@ -122,24 +275,32 @@ export function createStreamingBridge(
 
             case "ToolStateChange":
               ensureCard()
-              if (cardStartPromise) {
-                cardStartPromise.then(() => {
+                .then(() => {
                   card!
                     .setToolStatus(
-                      action.toolName,
-                      action.state as "running" | "completed" | "error",
-                      action.title,
+                      {
+                        partId: action.partId,
+                        name: action.toolName,
+                        state: action.state as "pending" | "running" | "completed" | "error",
+                        title: action.title,
+                        input: action.input,
+                      },
                     )
                     .catch((err) => {
                       logger.warn(`setToolStatus failed: ${err}`)
                     })
-                }).catch((err) => {
+                })
+                .catch((err) => {
                   logger.warn(`card start for tool failed: ${err}`)
                 })
-              }
               break
 
             case "SubtaskDiscovered": {
+              ensureCard()
+                .then(() => card!.addSubtask(action.description, action.agent))
+                .catch((err) => {
+                  logger.warn(`addSubtask failed: ${err}`)
+                })
               subAgentTracker
                 .onSubtaskDiscovered(action)
                 .then((tracked) => {
@@ -164,108 +325,63 @@ export function createStreamingBridge(
             case "QuestionAsked": {
               const cardKey = interactiveCardKey("question", action.requestId)
               if (seenInteractiveIds.has(cardKey)) break
-              if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("question", action.requestId)) {
+              if (!deps.embeddedInteractionRegistry) {
+                sendQuestionCard(action, chatId)
                 break
               }
-              logger.info(`Question event received in bridge for session ${sessionId}, requestId=${action.requestId}`)
-              const questionCard = buildQuestionCard(action)
-              feishuClient.sendMessage(chatId, {
-                msg_type: "interactive",
-                content: JSON.stringify(questionCard),
-              }).then((response) => {
-                const messageId = extractFeishuMessageId(response)
-                if (!messageId) {
-                  deps.interactiveCardRegistry?.failDispatch("question", action.requestId)
-                  return
-                }
-                seenInteractiveIds.add(cardKey)
-                deps.interactiveCardRegistry?.track({
-                  requestId: action.requestId,
-                  kind: "question",
-                  chatId,
-                  messageId,
+              seenInteractiveIds.add(cardKey)
+              ensureCard()
+                .then(async () => {
+                  deps.embeddedInteractionRegistry?.register({
+                    requestId: action.requestId,
+                    kind: "question",
+                    resolve: (selections) => card!.resolveInteraction(selections),
+                  })
+                  const title = action.questions[0]?.question ?? action.questions[0]?.header ?? "需要用户回答"
+                  await card!.setWaitingForQuestion(title, action.requestId)
+                  await card!.showQuestion(action)
                 })
-              }).catch((err) => {
-                deps.interactiveCardRegistry?.failDispatch("question", action.requestId)
-                logger.warn(`Question card send failed: ${err}`)
-              })
+                .catch((err) => {
+                  deps.embeddedInteractionRegistry?.untrack("question", action.requestId)
+                  logger.warn(`Embedded question failed for active bridge session: ${err}`)
+                })
               break
             }
 
             case "PermissionRequested": {
               const cardKey = interactiveCardKey("permission", action.requestId)
               if (seenInteractiveIds.has(cardKey)) break
-              if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("permission", action.requestId)) {
+              if (!deps.embeddedInteractionRegistry) {
+                sendPermissionCard(action, chatId)
                 break
               }
-              logger.info(`Permission event received in bridge for session ${sessionId}, requestId=${action.requestId}`)
-              const permissionCard = buildPermissionCard(action)
-              feishuClient.sendMessage(chatId, {
-                msg_type: "interactive",
-                content: JSON.stringify(permissionCard),
-              }).then((response) => {
-                const messageId = extractFeishuMessageId(response)
-                if (!messageId) {
-                  deps.interactiveCardRegistry?.failDispatch("permission", action.requestId)
-                  return
-                }
-                seenInteractiveIds.add(cardKey)
-                deps.interactiveCardRegistry?.track({
-                  requestId: action.requestId,
-                  kind: "permission",
-                  chatId,
-                  messageId,
+              seenInteractiveIds.add(cardKey)
+              ensureCard()
+                .then(async () => {
+                  deps.embeddedInteractionRegistry?.register({
+                    requestId: action.requestId,
+                    kind: "permission",
+                    resolve: (selections) => card!.resolveInteraction(selections),
+                  })
+                  await card!.setWaitingForPermission(action.title, action.requestId)
+                  await card!.showPermission(action)
                 })
-              }).catch((err) => {
-                deps.interactiveCardRegistry?.failDispatch("permission", action.requestId)
-                logger.warn(`Permission card send failed: ${err}`)
-              })
+                .catch((err) => {
+                  deps.embeddedInteractionRegistry?.untrack("permission", action.requestId)
+                  logger.warn(`Embedded permission failed for active bridge session: ${err}`)
+                })
               break
             }
 
             case "SessionIdle": {
               if (settled) return
+              if (boundMessageId === null && !postCompleted) {
+                logger.debug(`Ignoring idle before current response started for session ${sessionId}`)
+                return
+              }
               settled = true
-              clearTimeout(firstEventTimer)
-              removeListener(eventListeners, sessionId, myListener)
-              const responseText = textBuffer.trim() || "（无回复）"
-              const closeCard = card
-                ? (cardStartPromise ?? Promise.resolve()).then(() => card!.close())
-                : Promise.resolve()
-              closeCard
-                .then(async () => {
-                  try {
-                    await sendFinalResponse(responseText)
-                  } catch (err) {
-                    logger.warn(`sendFinalResponse failed: ${err}`)
-                  }
-                  if (deps.outboundMedia) {
-                    try {
-                      await deps.outboundMedia.sendDetectedFiles(chatId, responseText)
-                    } catch (err) {
-                      logger.warn(`outboundMedia.sendDetectedFiles failed: ${err}`)
-                    }
-                  }
-                  onComplete(responseText)
-                  resolve()
-                })
-                .catch(async (err) => {
-                  logger.warn(`card.close() failed: ${err}`)
-                  try {
-                    await sendFinalResponse(responseText)
-                  } catch (replyErr) {
-                    logger.warn(`sendFinalResponse failed after card.close error: ${replyErr}`)
-                  }
-                  if (deps.outboundMedia) {
-                    try {
-                      await deps.outboundMedia.sendDetectedFiles(chatId, responseText)
-                    } catch (mediaErr) {
-                      logger.warn(`outboundMedia.sendDetectedFiles failed: ${mediaErr}`)
-                    }
-                  }
-                  onComplete(responseText)
-                  resolve()
-                })
+              const responseText = getResponseText() || "（无回复）"
+              void complete(responseText)
               break
             }
 
@@ -277,39 +393,77 @@ export function createStreamingBridge(
         const firstEventTimer = setTimeout(async () => {
           if (gotFirstEvent || settled) return
           settled = true
-          removeListener(eventListeners, sessionId, myListener)
           logger.warn(
             `No SSE events received within ${FIRST_EVENT_TIMEOUT_MS}ms for ${sessionId}, falling back to sync response`,
           )
           const fallbackText = parseSyncResponse(syncResponseBody, logger)
-          try {
-            if (card) await card.close(fallbackText)
-          } catch (err) {
-            logger.warn(`card.close() in timeout fallback failed: ${err}`)
-          }
-          // Send fallback text as reply
-          try {
-            await sendFinalResponse(fallbackText)
-          } catch (err) {
-            logger.warn(`sendFinalResponse in timeout fallback failed: ${err}`)
-          }
-          if (deps.outboundMedia) {
-            try {
-              await deps.outboundMedia.sendDetectedFiles(chatId, fallbackText)
-            } catch (mediaErr) {
-              logger.warn(`outboundMedia.sendDetectedFiles in timeout fallback failed: ${mediaErr}`)
-            }
-          }
-          onComplete(fallbackText)
-          resolve()
+          void complete(fallbackText, "OpenCode 长时间未返回事件，已使用同步响应回退。")
         }, FIRST_EVENT_TIMEOUT_MS)
+        firstEventTimer.unref?.()
+
+        const absoluteTimer = setTimeout(() => {
+          handleLifecycleTimeout("OpenCode request exceeded its maximum lifetime")
+        }, deps.maxLifetimeMs ?? MAX_LIFETIME_MS)
+        absoluteTimer.unref?.()
+
+        function sendQuestionCard(action: QuestionAsked, targetChatId: string): void {
+          const cardKey = interactiveCardKey("question", action.requestId)
+          if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("question", action.requestId)) return
+          feishuClient.sendMessage(targetChatId, {
+            msg_type: "interactive",
+            content: JSON.stringify(buildQuestionCard(action)),
+          }).then((response) => {
+            const sentMessageId = extractFeishuMessageId(response)
+            if (!sentMessageId) {
+              deps.interactiveCardRegistry?.failDispatch("question", action.requestId)
+              return
+            }
+            seenInteractiveIds.add(cardKey)
+            deps.interactiveCardRegistry?.track({
+              requestId: action.requestId, kind: "question", chatId: targetChatId, messageId: sentMessageId,
+            })
+          }).catch((err) => {
+            deps.interactiveCardRegistry?.failDispatch("question", action.requestId)
+            logger.warn(`Question card send failed: ${err}`)
+          })
+        }
+
+        function sendPermissionCard(action: PermissionRequested, targetChatId: string): void {
+          const cardKey = interactiveCardKey("permission", action.requestId)
+          if (deps.interactiveCardRegistry && !deps.interactiveCardRegistry.beginDispatch("permission", action.requestId)) return
+          feishuClient.sendMessage(targetChatId, {
+            msg_type: "interactive",
+            content: JSON.stringify(buildPermissionCard(action)),
+          }).then((response) => {
+            const sentMessageId = extractFeishuMessageId(response)
+            if (!sentMessageId) {
+              deps.interactiveCardRegistry?.failDispatch("permission", action.requestId)
+              return
+            }
+            seenInteractiveIds.add(cardKey)
+            deps.interactiveCardRegistry?.track({
+              requestId: action.requestId, kind: "permission", chatId: targetChatId, messageId: sentMessageId,
+            })
+          }).catch((err) => {
+            deps.interactiveCardRegistry?.failDispatch("permission", action.requestId)
+            logger.warn(`Permission card send failed: ${err}`)
+          })
+        }
 
         // Register event listener BEFORE the POST to avoid race condition
         addListener(eventListeners, sessionId, myListener)
 
+        cardCreationTimer = setTimeout(() => {
+          if (settled) return
+          ensureCard()
+            .then(() => getResponseText() ? card!.setAnswerText(getResponseText()) : undefined)
+            .catch((err) => logger.warn(`delayed agent console start failed: ${err}`))
+        }, deps.cardCreationDelayMs ?? CARD_CREATION_DELAY_MS)
+        cardCreationTimer.unref?.()
 
-        sendMessage()
+          sendMessage()
           .then((responseBody) => {
+            postCompleted = true
             syncResponseBody = responseBody
             logger.info(
               `POST completed for session ${sessionId} (${responseBody.length} bytes)`,
@@ -324,12 +478,21 @@ export function createStreamingBridge(
               return
             }
             settled = true
-            clearTimeout(firstEventTimer)
+            clearTimers()
             removeListener(eventListeners, sessionId, myListener)
-            if (card) card.close().catch(() => {})
+            if (card) card.close({ status: "error", reason: String(err) }).catch(() => {})
             reject(err)
           })
-      })
+        })
+      } finally {
+        deps.activeSessions?.delete(sessionId)
+        release()
+        void tail.then(() => {
+          if (sessionTails.get(sessionId) === tail) {
+            sessionTails.delete(sessionId)
+          }
+        })
+      }
     },
   }
 }
@@ -342,16 +505,71 @@ function parseSyncResponse(rawText: string, logger: Logger): string {
     const data = JSON.parse(rawText) as {
       parts?: Array<{ type: string; text?: string }>
     }
-    return (
+    const text = (
       data.parts
         ?.filter((p) => p.type === "text" && p.text)
         .map((p) => p.text ?? "")
         .join("\n")
-        .trim() || "（无回复）"
-    )
+    ) ?? ""
+    return stripThinkingContent(text).trim() || "（无回复）"
   } catch (e) {
     logger.warn(`Failed to parse sync response: ${e}`)
-    return rawText.trim() || "（无回复）"
+    return stripThinkingContent(rawText).trim() || "（无回复）"
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function truncateResponseText(text: string): string {
+  const maxLength = 102_400
+  if (text.length <= maxLength) return text
+  return text.slice(0, maxLength) + "\n\n…(内容过长，已截断)"
+}
+
+export function stripThinkingContent(text: string): string {
+  let visible = text.replace(
+    /<(thinking|think|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
+    "",
+  )
+  visible = visible.replace(/<(thinking|think|analysis)\b[^>]*>[\s\S]*$/gi, "")
+  visible = visible.replace(/<\/(thinking|think|analysis)\s*>/gi, "")
+
+  const lastOpen = visible.lastIndexOf("<")
+  if (lastOpen >= 0) {
+    const suffix = visible.slice(lastOpen).toLowerCase()
+    if (
+      "<thinking".startsWith(suffix)
+      || "<think".startsWith(suffix)
+      || "<analysis".startsWith(suffix)
+    ) {
+      visible = visible.slice(0, lastOpen)
+    }
+  }
+  return visible
+}
+
+async function isSessionBusy(serverUrl: string, sessionId: string, logger: Logger): Promise<boolean> {
+  try {
+    const response = await fetch(`${serverUrl}/session/status`)
+    if (!response.ok) return false
+    const statuses = await response.json() as Record<string, { type?: string }>
+    return statuses[sessionId]?.type === "busy" || statuses[sessionId]?.type === "retry"
+  } catch (err) {
+    logger.warn(`Failed to check session status before prompt: ${err}`)
+    return false
   }
 }
 

@@ -12,6 +12,10 @@ function createMockCardKitClient(): CardKitClient & {
     createCard: vi.fn().mockResolvedValue("card_123"),
     updateElement: vi.fn().mockResolvedValue(undefined),
     closeStreaming: vi.fn().mockResolvedValue(undefined),
+    renewStreaming: vi.fn().mockResolvedValue(undefined),
+    pauseStreaming: vi.fn().mockResolvedValue(undefined),
+    insertElements: vi.fn().mockResolvedValue(undefined),
+    deleteElement: vi.fn().mockResolvedValue(undefined),
   } as any
 }
 

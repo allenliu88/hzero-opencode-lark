@@ -13,6 +13,59 @@ function makeProcessor(sessions: string[] = ["ses-1"]) {
 }
 
 describe("EventProcessor", () => {
+  it("filters text parts belonging to a user message", () => {
+    const proc = makeProcessor()
+    expect(proc.processEvent({
+      type: "message.updated",
+      properties: {
+        info: { id: "user-msg", sessionID: "ses-1", role: "user" },
+      },
+    })).toBeNull()
+
+    expect(proc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "user-part",
+          sessionID: "ses-1",
+          messageID: "user-msg",
+          type: "text",
+          text: "你是谁？\n[Lark context]",
+        },
+      },
+    })).toBeNull()
+  })
+
+  it("keeps text parts belonging to an assistant message", () => {
+    const proc = makeProcessor()
+    proc.processEvent({
+      type: "message.updated",
+      properties: {
+        info: { id: "assistant-msg", sessionID: "ses-1", role: "assistant" },
+      },
+    })
+
+    expect(proc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "assistant-part",
+          sessionID: "ses-1",
+          messageID: "assistant-msg",
+          type: "text",
+          text: "我是飞码智能体。",
+        },
+      },
+    })).toEqual<TextDelta>({
+      type: "TextDelta",
+      sessionId: "ses-1",
+      messageId: "assistant-msg",
+      partId: "assistant-part",
+      text: "我是飞码智能体。",
+      source: "snapshot",
+    })
+  })
+
   describe("TextDelta", () => {
     it("extracts text delta from message.part.updated (text part)", () => {
       const proc = makeProcessor()
@@ -20,6 +73,7 @@ describe("EventProcessor", () => {
         type: "message.part.updated",
         properties: {
           part: {
+            id: "part-tool-1",
             sessionID: "ses-1",
             messageID: "msg-1",
             type: "text",
@@ -32,7 +86,10 @@ describe("EventProcessor", () => {
       expect(result).toEqual<TextDelta>({
         type: "TextDelta",
         sessionId: "ses-1",
-        text: "world",
+        messageId: "msg-1",
+        partId: "part-tool-1",
+        text: "Hello world",
+        source: "snapshot",
       })
     })
 
@@ -49,7 +106,7 @@ describe("EventProcessor", () => {
       expect(result).toBeNull()
     })
 
-    it("returns null when delta is missing", () => {
+    it("uses the full text snapshot when delta is missing", () => {
       const proc = makeProcessor()
       const result = proc.processEvent({
         type: "message.part.updated",
@@ -58,7 +115,14 @@ describe("EventProcessor", () => {
         },
       })
 
-      expect(result).toBeNull()
+      expect(result).toEqual<TextDelta>({
+        type: "TextDelta",
+        sessionId: "ses-1",
+        messageId: "msg-1",
+        partId: "msg-1:text",
+        text: "hi",
+        source: "snapshot",
+      })
     })
   })
 
@@ -79,7 +143,10 @@ describe("EventProcessor", () => {
       expect(result).toEqual<TextDelta>({
         type: "TextDelta",
         sessionId: "ses-1",
+        messageId: "msg-1",
+        partId: "prt-1",
         text: "pong ",
+        source: "delta",
       })
     })
 
@@ -139,6 +206,7 @@ describe("EventProcessor", () => {
         type: "message.part.updated",
         properties: {
           part: {
+            id: "part-tool-1",
             sessionID: "ses-1",
             messageID: "msg-1",
             type: "tool",
@@ -152,6 +220,7 @@ describe("EventProcessor", () => {
       expect(result).toEqual<ToolStateChange>({
         type: "ToolStateChange",
         sessionId: "ses-1",
+        partId: "part-tool-1",
         toolName: "bash",
         state: "running",
         input: {},

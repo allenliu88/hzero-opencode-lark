@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import type { EventListenerMap } from "../utils/event-listeners.js"
-import { createStreamingBridge, type StreamingBridgeDeps } from "./streaming-integration.js"
+import { createStreamingBridge, stripThinkingContent, type StreamingBridgeDeps } from "./streaming-integration.js"
 import { EventProcessor } from "../streaming/event-processor.js"
 import { createMockLogger, createMockFeishuClient, waitFor } from "../__tests__/setup.js"
 import type { CardKitClient } from "../feishu/cardkit-client.js"
 import type { SubAgentTracker } from "../streaming/subagent-tracker.js"
 import { ExpiringSet } from "../utils/expiring-set.js"
+import { createEmbeddedInteractionRegistry } from "../feishu/embedded-interaction-registry.js"
 
 function createMockInteractiveCardRegistry() {
   const cards = new Map<string, {
@@ -73,6 +74,10 @@ function createMockCardKitClient() {
     createCard: vi.fn().mockResolvedValue("card_123"),
     updateElement: vi.fn().mockResolvedValue(undefined),
     closeStreaming: vi.fn().mockResolvedValue(undefined),
+    renewStreaming: vi.fn().mockResolvedValue(undefined),
+    pauseStreaming: vi.fn().mockResolvedValue(undefined),
+    insertElements: vi.fn().mockResolvedValue(undefined),
+    deleteElement: vi.fn().mockResolvedValue(undefined),
   } as unknown as CardKitClient
 }
 
@@ -128,8 +133,10 @@ describe("createStreamingBridge", () => {
     }
   })
 
-  it("tracks question cards sent from the streaming bridge", async () => {
+  it("embeds questions in the streaming card instead of sending a separate card", async () => {
+    const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
     const deps = makeDeps({
+      embeddedInteractionRegistry,
       feishuClient: {
         ...createMockFeishuClient(),
         sendMessage: vi.fn().mockResolvedValue({
@@ -172,15 +179,14 @@ describe("createStreamingBridge", () => {
         ],
       },
     })
-    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect((deps.cardkitClient as any).insertElements).toHaveBeenCalled()
 
-    expect(deps.interactiveCardRegistry?.list()).toEqual([
-      expect.objectContaining({
-        requestId: "q-bridge",
-        kind: "question",
-        messageId: "msg-question",
-      }),
-    ])
+    const inserted = (deps.cardkitClient as any).insertElements.mock.calls.at(-1)?.[1]
+    expect(JSON.stringify(inserted)).toContain("question_answer")
+    expect(embeddedInteractionRegistry.get("question", "q-bridge")).toBeDefined()
+    expect(deps.interactiveCardRegistry?.list()).toEqual([])
+    expect(deps.feishuClient.sendMessage).toHaveBeenCalledTimes(1)
 
     listener({
       type: "session.status",
@@ -463,6 +469,103 @@ describe("createStreamingBridge", () => {
     await handlePromise
 
     expect(eventListeners.size).toBe(0)
+  })
+
+  it("serializes concurrent requests for the same session", async () => {
+    const deps = makeDeps({
+      feishuClient: {
+        ...createMockFeishuClient(),
+        sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      },
+      cardCreationDelayMs: 10_000,
+    })
+    const bridge = createStreamingBridge(deps)
+    const sendFirst = vi.fn().mockResolvedValue("")
+    const sendSecond = vi.fn().mockResolvedValue("")
+
+    const first = bridge.handleMessage(
+      "chat-1", "ses-1", eventListeners, eventProcessor,
+      sendFirst, vi.fn(), "msg-first", null,
+    )
+    await waitFor(() => expect(sendFirst).toHaveBeenCalledOnce())
+
+    const second = bridge.handleMessage(
+      "chat-1", "ses-1", eventListeners, eventProcessor,
+      sendSecond, vi.fn(), "msg-second", null,
+    )
+    await Promise.resolve()
+    expect(sendSecond).not.toHaveBeenCalled()
+    expect(eventListeners.get("ses-1")?.size).toBe(1)
+
+    const firstListener = [...eventListeners.get("ses-1")!][0]!
+    firstListener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await first
+
+    await waitFor(() => expect(sendSecond).toHaveBeenCalledOnce())
+    expect(eventListeners.get("ses-1")?.size).toBe(1)
+    const secondListener = [...eventListeners.get("ses-1")!][0]!
+    secondListener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await second
+
+    expect(eventListeners.size).toBe(0)
+  })
+
+  it("finalizes and removes the listener when the event stream becomes inactive", async () => {
+    vi.useFakeTimers()
+    const mockFeishu = {
+      ...createMockFeishuClient(),
+      sendMessage: vi.fn().mockResolvedValue({
+        code: 0,
+        data: { message_id: "msg_456" },
+      }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+    }
+    const deps = makeDeps({
+      feishuClient: mockFeishu,
+      inactivityTimeoutMs: 100,
+      maxLifetimeMs: 1_000,
+      cardCloseTimeoutMs: 50,
+    })
+    const bridge = createStreamingBridge(deps)
+    const onComplete = vi.fn()
+    const handlePromise = bridge.handleMessage(
+      "chat-1",
+      "ses-1",
+      eventListeners,
+      eventProcessor,
+      mockSendMessage,
+      onComplete,
+      "msg_original",
+      null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    const listener = [...eventListeners.get("ses-1")!][0]!
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: { sessionID: "ses-1", messageID: "m-1", type: "text", text: "partial" },
+        delta: "partial",
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(100)
+    await handlePromise
+
+    expect(eventListeners.size).toBe(0)
+    expect(onComplete).toHaveBeenCalledWith("partial")
+    expect(mockFeishu.replyMessage).toHaveBeenCalled()
+    expect(deps.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("OpenCode event stream became inactive"),
+    )
+    vi.useRealTimers()
   })
 
   it("throws when card.start() fails (for fallback in caller)", async () => {
@@ -776,6 +879,295 @@ describe("createStreamingBridge", () => {
     expect(onComplete).toHaveBeenCalledWith("Hello World")
   })
 
+  it("streams a direct answer without a blank progress row or duplicate final reply", async () => {
+    vi.useFakeTimers()
+    const mockFeishu = {
+      ...createMockFeishuClient(),
+      sendMessage: vi.fn().mockResolvedValue({
+        code: 0,
+        data: { message_id: "msg_456" },
+      }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+    }
+    const mockCardKit = createMockCardKitClient()
+    const deps = makeDeps({
+      cardkitClient: mockCardKit,
+      feishuClient: mockFeishu,
+      cardCreationDelayMs: 0,
+    })
+    const bridge = createStreamingBridge(deps)
+    const onComplete = vi.fn()
+    const handlePromise = bridge.handleMessage(
+      "chat-1",
+      "ses-1",
+      eventListeners,
+      eventProcessor,
+      mockSendMessage,
+      onComplete,
+      "msg_original",
+      null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    const listener = [...eventListeners.get("ses-1")!][0]!
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: { sessionID: "ses-1", messageID: "m-1", type: "text", text: "流式答案" },
+        delta: "流式答案",
+      },
+    })
+    await vi.advanceTimersByTimeAsync(300)
+
+    expect((mockCardKit as any).updateElement).toHaveBeenCalledWith(
+      "card_123",
+      "progress",
+      "流式答案",
+      expect.any(Number),
+    )
+
+    listener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await handlePromise
+
+    expect(mockFeishu.replyMessage).not.toHaveBeenCalled()
+    expect(onComplete).toHaveBeenCalledWith("流式答案")
+    vi.useRealTimers()
+  })
+
+  it("uses snapshots to correct deltas without duplicating text and ignores other messages", async () => {
+    vi.useFakeTimers()
+    const mockCardKit = createMockCardKitClient()
+    const deps = makeDeps({
+      cardkitClient: mockCardKit,
+      feishuClient: {
+        ...createMockFeishuClient(),
+        sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      },
+      cardCreationDelayMs: 0,
+    })
+    const bridge = createStreamingBridge(deps)
+    const onComplete = vi.fn()
+    const handlePromise = bridge.handleMessage(
+      "chat-1", "ses-1", eventListeners, eventProcessor,
+      mockSendMessage, onComplete, "msg_original", null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    const listener = [...eventListeners.get("ses-1")!][0]!
+
+    listener({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "ses-1", messageID: "current-message", partID: "part-1",
+        field: "text", delta: "你是",
+      },
+    })
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1", sessionID: "ses-1", messageID: "current-message",
+          type: "text", text: "你是谁？",
+        },
+        delta: "谁？",
+      },
+    })
+    listener({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "ses-1", messageID: "old-message", partID: "old-part",
+        field: "text", delta: "无关开发内容",
+      },
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    listener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await handlePromise
+
+    expect(onComplete).toHaveBeenCalledWith("你是谁？")
+    const answerUpdates = (mockCardKit as any).updateElement.mock.calls
+      .filter((call: unknown[]) => call[1] === "progress")
+    expect(answerUpdates.at(-1)?.[2]).toBe("你是谁？")
+    vi.useRealTimers()
+  })
+
+  it("does not stream the injected user prompt as the assistant answer", async () => {
+    vi.useFakeTimers()
+    const mockCardKit = createMockCardKitClient()
+    const deps = makeDeps({
+      cardkitClient: mockCardKit,
+      feishuClient: {
+        ...createMockFeishuClient(),
+        sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      },
+      cardCreationDelayMs: 0,
+    })
+    const bridge = createStreamingBridge(deps)
+    const onComplete = vi.fn()
+    const handlePromise = bridge.handleMessage(
+      "chat-1", "ses-1", eventListeners, eventProcessor,
+      mockSendMessage, onComplete, "msg_original", null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    const listener = [...eventListeners.get("ses-1")!][0]!
+
+    listener({
+      type: "message.updated",
+      properties: { info: { id: "user-msg", sessionID: "ses-1", role: "user" } },
+    })
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "user-part", sessionID: "ses-1", messageID: "user-msg", type: "text",
+          text: "你是谁？\n[Lark context]\nChat: (p2p)",
+        },
+      },
+    })
+    listener({
+      type: "message.updated",
+      properties: { info: { id: "assistant-msg", sessionID: "ses-1", role: "assistant" } },
+    })
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "assistant-part", sessionID: "ses-1", messageID: "assistant-msg", type: "text",
+          text: "我是飞码智能体。",
+        },
+      },
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    listener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await handlePromise
+
+    expect(onComplete).toHaveBeenCalledWith("我是飞码智能体。")
+    const answerUpdates = (mockCardKit as any).updateElement.mock.calls
+      .filter((call: unknown[]) => call[1] === "progress")
+    expect(answerUpdates.at(-1)?.[2]).toBe("我是飞码智能体。")
+    vi.useRealTimers()
+  })
+
+  it("rejects a busy session before registering a listener or sending the prompt", async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      "ses-1": { type: "busy" },
+    }), { status: 200 })) as typeof fetch
+    try {
+      const deps = makeDeps({ serverUrl: "http://127.0.0.1:4096" })
+      const bridge = createStreamingBridge(deps)
+      const sendMessage = vi.fn().mockResolvedValue("")
+
+      await expect(bridge.handleMessage(
+        "chat-1", "ses-1", eventListeners, eventProcessor,
+        sendMessage, vi.fn(), "msg_original", null,
+      )).rejects.toMatchObject({ name: "SessionBusyError", sessionId: "ses-1" })
+
+      expect(sendMessage).not.toHaveBeenCalled()
+      expect(eventListeners.size).toBe(0)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it("skips creating a streaming card for a request completed before the delay", async () => {
+    vi.useFakeTimers()
+    const mockFeishu = {
+      ...createMockFeishuClient(),
+      sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+    }
+    const mockCardKit = createMockCardKitClient()
+    const deps = makeDeps({
+      cardkitClient: mockCardKit,
+      feishuClient: mockFeishu,
+      cardCreationDelayMs: 500,
+    })
+    const bridge = createStreamingBridge(deps)
+    const handlePromise = bridge.handleMessage(
+      "chat-1",
+      "ses-1",
+      eventListeners,
+      eventProcessor,
+      mockSendMessage,
+      vi.fn(),
+      "msg_original",
+      null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    const listener = [...eventListeners.get("ses-1")!][0]!
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: { sessionID: "ses-1", messageID: "m-1", type: "text", text: "快速答案" },
+        delta: "快速答案",
+      },
+    })
+    listener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await handlePromise
+    await vi.advanceTimersByTimeAsync(500)
+
+    expect((mockCardKit as any).createCard).not.toHaveBeenCalled()
+    expect(mockFeishu.replyMessage).toHaveBeenCalledOnce()
+    vi.useRealTimers()
+  })
+
+  it("sends the complete answer separately when the streaming element is truncated", async () => {
+    vi.useFakeTimers()
+    const mockFeishu = {
+      ...createMockFeishuClient(),
+      sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+    }
+    const deps = makeDeps({
+      cardkitClient: createMockCardKitClient(),
+      feishuClient: mockFeishu,
+      cardCreationDelayMs: 0,
+    })
+    const bridge = createStreamingBridge(deps)
+    const handlePromise = bridge.handleMessage(
+      "chat-1",
+      "ses-1",
+      eventListeners,
+      eventProcessor,
+      mockSendMessage,
+      vi.fn(),
+      "msg_original",
+      null,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    const listener = [...eventListeners.get("ses-1")!][0]!
+    const longText = "长".repeat(10_000)
+    listener({
+      type: "message.part.updated",
+      properties: {
+        part: { sessionID: "ses-1", messageID: "m-1", type: "text", text: longText },
+        delta: longText,
+      },
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    listener({
+      type: "session.status",
+      properties: { sessionID: "ses-1", status: { type: "idle" } },
+    })
+    await handlePromise
+
+    expect(mockFeishu.replyMessage).toHaveBeenCalledOnce()
+    vi.useRealTimers()
+  })
+
   it("SubtaskDiscovered sends separate card instead of button", async () => {
     const mockFeishu = {
       ...createMockFeishuClient(),
@@ -1021,5 +1413,18 @@ describe("createStreamingBridge", () => {
     expect(card.elements?.[0]?.content).toBe("Hello World")
     // deleteReaction called
     expect(mockFeishu.deleteReaction).toHaveBeenCalledWith("msg_original", "reaction_123")
+  })
+})
+
+describe("stripThinkingContent", () => {
+  it("removes complete thinking and analysis blocks", () => {
+    expect(stripThinkingContent(
+      "<thinking>内部推理</thinking>可见答案<analysis>更多推理</analysis>",
+    )).toBe("可见答案")
+  })
+
+  it("hides an incomplete streamed thinking block", () => {
+    expect(stripThinkingContent("前文<thinking>尚未结束")).toBe("前文")
+    expect(stripThinkingContent("前文<thi")).toBe("前文")
   })
 })

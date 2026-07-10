@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
 import { createCommandHandler } from "../command-handler.js"
+import { buildCommandSelectedCard } from "../../feishu/interactive-card-response.js"
 import { createMockLogger, createMockFeishuClient } from "../../__tests__/setup.js"
 import type { SessionManager } from "../../session/session-manager.js"
 import type { SessionMapping } from "../../types.js"
@@ -261,6 +262,18 @@ describe("createCommandHandler", () => {
 
 
   describe("/help and /", () => {
+    it("builds a command selection card without interactive buttons", () => {
+      const card = buildCommandSelectedCard("/new") as {
+        elements: Array<{ tag: string; content?: string }>
+      }
+
+      expect(card.elements).toEqual([{
+        tag: "markdown",
+        content: "已选择执行 **新建会话**。",
+      }])
+      expect(JSON.stringify(card)).not.toContain('"tag":"button"')
+    })
+
     it("/help sends interactive card", async () => {
       mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
 
@@ -298,6 +311,47 @@ describe("createCommandHandler", () => {
       expect(content).toHaveProperty("config")
       expect(content).toHaveProperty("header")
       expect(content).toHaveProperty("elements")
+    })
+  })
+
+  describe("/test-loading", () => {
+    it("sends a legacy loading test card", async () => {
+      mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
+
+      const handler = createHandler()
+      const result = await handler("chat-1", "chat-1", "msg-1", "/test-loading")
+
+      expect(result).toBe(true)
+      expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
+        msg_type: "interactive",
+        content: expect.any(String),
+      })
+      const callArgs = (mockFeishuClient.replyMessage as any).mock.calls[0]
+      const content = JSON.parse(callArgs?.[1]?.content as string)
+      expect(content.header?.title?.content).toBe("工具执行中，请稍候")
+      expect(content.header?.template).toBe("yellow")
+      expect(content.elements?.[0]?.tag).toBe("div")
+      expect(content.elements?.[0]?.loading).toBe(true)
+    })
+
+    it("sends a Card JSON 2.0 loading test card", async () => {
+      mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
+
+      const handler = createHandler()
+      const result = await handler("chat-1", "chat-1", "msg-1", "/test-loading-v2")
+
+      expect(result).toBe(true)
+      expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
+        msg_type: "interactive",
+        content: expect.any(String),
+      })
+      const callArgs = (mockFeishuClient.replyMessage as any).mock.calls[0]
+      const content = JSON.parse(callArgs?.[1]?.content as string)
+      expect(content.schema).toBe("2.0")
+      expect(content.header?.title?.content).toBe("工具执行中，请稍候（2.0）")
+      expect(content.body?.elements?.[0]?.tag).toBe("div")
+      expect(content.body?.elements?.[0]?.loading).toBe(true)
+      expect(content.body?.elements?.[0]?.element_id).toBe("loading_div")
     })
   })
 

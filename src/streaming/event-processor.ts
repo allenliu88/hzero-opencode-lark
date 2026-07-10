@@ -10,13 +10,17 @@
 export interface TextDelta {
   readonly type: "TextDelta"
   readonly sessionId: string
+  readonly messageId: string
+  readonly partId: string
   readonly text: string
+  readonly source: "delta" | "snapshot"
 }
 
 
 export interface ToolStateChange {
   readonly type: "ToolStateChange"
   readonly sessionId: string
+  readonly partId?: string
   readonly toolName: string
   readonly state: string
   readonly input?: Record<string, unknown>
@@ -95,6 +99,17 @@ interface MessagePartUpdatedEvent {
   }
 }
 
+interface MessageUpdatedEvent {
+  type: "message.updated"
+  properties: {
+    info: {
+      id: string
+      sessionID: string
+      role: "user" | "assistant"
+    }
+  }
+}
+
 // Streaming text delta — separate event type from message.part.updated
 interface MessagePartDeltaEvent {
   type: "message.part.delta"
@@ -158,6 +173,7 @@ interface PermissionAskedEvent {
 }
 
 type KnownEvent =
+  | MessageUpdatedEvent
   | MessagePartUpdatedEvent
   | MessagePartDeltaEvent
   | SessionStatusEvent
@@ -177,6 +193,7 @@ function hasType(v: unknown): v is { type: string } {
 }
 
 const KNOWN_TYPES = new Set([
+  "message.updated",
   "message.part.updated",
   "message.part.delta",
   "session.status",
@@ -202,6 +219,7 @@ export interface EventProcessorOptions {
 export class EventProcessor {
   private readonly ownedSessions: Set<string>
   private readonly reasoningPartIds = new Set<string>()
+  private readonly messageRoles = new Map<string, "user" | "assistant">()
   private readonly logger?: { warn(msg: string, ...args: unknown[]): void }
 
   constructor(options: EventProcessorOptions) {
@@ -214,6 +232,8 @@ export class EventProcessor {
       if (!isKnownEvent(raw)) return null
 
       switch (raw.type) {
+        case "message.updated":
+          return this.processMessageUpdated(raw)
         case "message.part.updated":
           return this.processMessagePartUpdated(raw)
         case "message.part.delta":
@@ -240,6 +260,15 @@ export class EventProcessor {
   // Private handlers
   // -------------------------------------------------------------------------
 
+  private processMessageUpdated(event: MessageUpdatedEvent): null {
+    const info = event.properties?.info
+    if (!info || typeof info.id !== "string") return null
+    if (info.role !== "user" && info.role !== "assistant") return null
+    if (this.messageRoles.size >= 10_000) this.messageRoles.clear()
+    this.messageRoles.set(info.id, info.role)
+    return null
+  }
+
   private processMessagePartUpdated(
     event: MessagePartUpdatedEvent,
   ): ProcessedAction | null {
@@ -252,6 +281,7 @@ export class EventProcessor {
 
     const partType = (part as Record<string, unknown>).type
     if (typeof partType !== "string") return null
+    if (this.messageRoles.get(part.messageID) === "user") return null
 
     // Track reasoning part IDs so message.part.delta events can be filtered
     const partId = (part as Record<string, unknown>).id
@@ -261,7 +291,7 @@ export class EventProcessor {
 
     switch (partType) {
       case "text":
-        return this.processTextPart(sessionId, delta)
+        return this.processTextPart(sessionId, part, delta)
       case "reasoning":
         return this.processReasoningPart(sessionId, delta)
       case "tool":
@@ -286,6 +316,10 @@ export class EventProcessor {
     const field = (props as Record<string, unknown>).field
     if (field !== "text") return null
 
+    const messageId = (props as Record<string, unknown>).messageID
+    if (typeof messageId !== "string") return null
+    if (this.messageRoles.get(messageId) === "user") return null
+
     const delta = (props as Record<string, unknown>).delta
     if (typeof delta !== "string" || delta.length === 0) return null
 
@@ -295,15 +329,30 @@ export class EventProcessor {
       return null
     }
 
-    return { type: "TextDelta", sessionId, text: delta }
+    if (typeof partID !== "string") return null
+    return { type: "TextDelta", sessionId, messageId, partId: partID, text: delta, source: "delta" }
   }
 
   private processTextPart(
     sessionId: string,
+    part: MessagePartUpdatedEvent["properties"]["part"],
     delta: string | undefined,
   ): TextDelta | null {
+    const messageId = part.messageID
+    const partId = part.id ?? `${messageId}:text`
+    if (typeof messageId !== "string") return null
+    if (typeof part.text === "string" && part.text.length > 0) {
+      return {
+        type: "TextDelta",
+        sessionId,
+        messageId,
+        partId,
+        text: mergeSnapshotAndDelta(part.text, delta),
+        source: "snapshot",
+      }
+    }
     if (typeof delta !== "string" || delta.length === 0) return null
-    return { type: "TextDelta", sessionId, text: delta }
+    return { type: "TextDelta", sessionId, messageId, partId, text: delta, source: "delta" }
   }
 
   private processReasoningPart(
@@ -327,9 +376,11 @@ export class EventProcessor {
     const title = (state as Record<string, unknown>).title
     const input = (state as Record<string, unknown>).input
     const output = (state as Record<string, unknown>).output
+    const partId = part.id
     const result: ToolStateChange = {
       type: "ToolStateChange",
       sessionId,
+      ...(typeof partId === "string" ? { partId } : {}),
       toolName,
       state: status,
       ...(isObject(input) ? { input: input as Record<string, unknown> } : {}),
@@ -447,4 +498,15 @@ export class EventProcessor {
       metadata: isObject(metadata) ? metadata as Record<string, unknown> : {},
     }
   }
+}
+
+function mergeSnapshotAndDelta(snapshot: string, delta: string | undefined): string {
+  if (!delta || snapshot.endsWith(delta)) return snapshot
+  const maxOverlap = Math.min(snapshot.length, delta.length)
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    if (snapshot.endsWith(delta.slice(0, overlap))) {
+      return snapshot + delta.slice(overlap)
+    }
+  }
+  return snapshot + delta
 }

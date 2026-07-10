@@ -24,6 +24,12 @@
   // Data directory for SQLite database
   "dataDir": "./data",
 
+  // Session binding policy. Keep false so a new Feishu thread gets clean context.
+  // Use /connect to explicitly attach an existing OpenCode/TUI session.
+  "session": {
+    "autoDiscoverTui": false
+  },
+
   // Progress card update debounce configuration
   "progress": {
     "debounceMs": 500,

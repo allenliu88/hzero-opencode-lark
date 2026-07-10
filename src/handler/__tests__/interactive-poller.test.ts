@@ -262,6 +262,19 @@ describe("interactive-poller", () => {
       expect(deps.feishuClient.sendMessage).not.toHaveBeenCalled()
     })
 
+    it("does not send a separate question card for an active bridge session", async () => {
+      const deps = createDeps({
+        activeSessions: new Set([SAMPLE_QUESTION.sessionID]),
+      })
+      globalThis.fetch = mockFetchPerUrl(okJson([SAMPLE_QUESTION]), okJson([]))
+      const poller = createInteractivePoller(deps)
+      poller.start()
+      await advanceTimers(0)
+
+      expect(deps.feishuClient.sendMessage).not.toHaveBeenCalled()
+      expect(deps.interactiveCardRegistry.list()).toEqual([])
+    })
+
     it("skips question when no chatId for session", async () => {
       const deps = createDeps({
         getChatForSession: vi.fn().mockReturnValue(undefined),

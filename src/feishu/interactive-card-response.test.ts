@@ -2,10 +2,72 @@ import { describe, expect, it } from "vitest"
 import {
   buildAnsweredPermissionCard,
   buildAnsweredQuestionCard,
+  buildCommandSelectedCard,
   buildInteractiveCallbackResponse,
 } from "./interactive-card-response.js"
 
 describe("interactive-card-response", () => {
+  it("immediately replaces a selected command menu with non-interactive text", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: {
+        tag: "button",
+        value: { action: "command_execute", command: "/new" },
+      },
+      open_message_id: "msg-command",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response).toEqual({
+      card: {
+        type: "raw",
+        data: buildCommandSelectedCard("/new"),
+      },
+    })
+    expect(JSON.stringify(response)).toContain("已选择执行 **新建会话**。")
+    expect(JSON.stringify(response)).not.toContain('"tag":"button"')
+  })
+
+  it("returns only a toast for embedded interactions", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: { tag: "button", value: {
+        action: "question_answer",
+        requestId: "q-1",
+        answers: JSON.stringify([["Yes"]]),
+        embedded: "true",
+      } },
+      open_message_id: "msg-1",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response.toast).toBeDefined()
+    expect(response.card).toBeUndefined()
+  })
+
+  it("shows multiple form selections in the callback toast", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: {
+        tag: "button",
+        value: {
+          action: "question_answer",
+          requestId: "q-1",
+          embedded: "true",
+          multiple: "true",
+          optionLabels: JSON.stringify(["技术约束", "实现方案"]),
+        },
+        form_value: { question_choice_0: true, question_choice_1: "on" },
+      },
+      open_message_id: "msg-1",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response).toEqual({
+      toast: { type: "success", content: "Answered: 技术约束，实现方案" },
+    })
+  })
+
   it("builds the existing question callback response shape", () => {
     const response = buildInteractiveCallbackResponse({
       action: {
@@ -22,7 +84,7 @@ describe("interactive-card-response", () => {
     })
 
     expect(response).toEqual({
-      toast: { type: "success", content: "✅ Answered: Yes" },
+      toast: { type: "success", content: "Answered: Yes" },
       card: {
         type: "raw",
         data: {

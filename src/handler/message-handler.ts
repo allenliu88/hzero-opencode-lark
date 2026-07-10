@@ -14,7 +14,7 @@ import type { ProgressTracker } from "../session/progress-tracker.js"
 import type { Logger } from "../utils/logger.js"
 import type { FeishuMessageEvent } from "../types.js"
 import type { StreamingBridge } from "./streaming-integration.js"
-import { buildFinalResponseCard } from "./streaming-integration.js"
+import { buildFinalResponseCard, SessionBusyError } from "./streaming-integration.js"
 import type { SessionObserver } from "../streaming/session-observer.js"
 import type { EventListenerMap } from "../utils/event-listeners.js"
 import { addListener, removeListener } from "../utils/event-listeners.js"
@@ -735,6 +735,16 @@ export function createMessageHandler(
         logger.info(`Response sent for session ${sessionId} (streaming bridge)`)
         return
       } catch (err) {
+        if (err instanceof SessionBusyError) {
+          if (reactionId) {
+            await feishuClient.deleteReaction(event.message_id, reactionId).catch(() => {})
+          }
+          await feishuClient.replyMessage(event.message_id, {
+            msg_type: "interactive",
+            content: JSON.stringify(buildFinalResponseCard("当前会话正在执行，请稍后重试或使用 /new 创建新会话。")),
+          })
+          return
+        }
         if (err instanceof SessionGoneError) {
           // 404 self-healing: clear stale mapping, get new session, retry once
           logger.warn(`Session ${sessionId} returned 404 in streaming path — clearing stale mapping and retrying`)
@@ -1007,6 +1017,16 @@ export function createMessageHandler(
         logger.info(`Response sent for session ${sessionId} (streaming bridge, debounced)`)
         return
       } catch (err) {
+        if (err instanceof SessionBusyError) {
+          if (reactionId) {
+            await feishuClient.deleteReaction(reactionMsgId, reactionId).catch(() => {})
+          }
+          await feishuClient.replyMessage(lastEvent.message_id, {
+            msg_type: "interactive",
+            content: JSON.stringify(buildFinalResponseCard("当前会话正在执行，请稍后重试或使用 /new 创建新会话。")),
+          })
+          return
+        }
         if (err instanceof SessionGoneError) {
           logger.warn(`Session ${sessionId} returned 404 in debounced streaming path — clearing stale mapping and retrying`)
           sessionManager.deleteMapping(feishuKey)
@@ -1100,7 +1120,9 @@ export function createMessageHandler(
     thinkingMessageId: string | null,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      let textBuffer = ""
+      const textParts = new Map<string, string>()
+      const textPartSources = new Map<string, "delta" | "snapshot">()
+      let boundMessageId: string | null = null
       let settled = false
 
       const myListener = (rawEvent: unknown): void => {
@@ -1109,16 +1131,29 @@ export function createMessageHandler(
         if (action.sessionId !== sessionId) return
 
         switch (action.type) {
-          case "TextDelta":
-            textBuffer += action.text
+          case "TextDelta": {
+            if (boundMessageId === null) boundMessageId = action.messageId
+            if (action.messageId !== boundMessageId) return
+            const current = textParts.get(action.partId) ?? ""
+            if (
+              action.source === "delta" &&
+              textPartSources.get(action.partId) === "snapshot" &&
+              current.endsWith(action.text)
+            ) {
+              textPartSources.set(action.partId, "delta")
+              return
+            }
+            textParts.set(action.partId, action.source === "snapshot" ? action.text : current + action.text)
+            textPartSources.set(action.partId, action.source)
             break
+          }
 
           case "SessionIdle": {
             if (settled) return
             settled = true
             cleanup()
 
-            const responseText = textBuffer.trim() || "（无回复）"
+            const responseText = [...textParts.values()].join("").trim() || "（无回复）"
 
             // Send response
 

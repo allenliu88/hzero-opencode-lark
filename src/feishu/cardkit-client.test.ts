@@ -12,8 +12,13 @@ function okResponse(data?: Record<string, unknown>) {
   return { code: 0, msg: "ok", data }
 }
 
-function jsonResponse(body: unknown): Response {
-  return { json: async () => body } as Response
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    json: async () => body,
+  } as Response
 }
 
 const sampleCard: CardKitSchema = {
@@ -111,6 +116,60 @@ describe("CardKitClient", () => {
     expect(settings.config.summary.content).toBe("Summary text")
   })
 
+  it("renewStreaming sends PATCH with streaming settings", async () => {
+    queueResponses(tokenResponse(), okResponse())
+
+    await client.renewStreaming("card-123", 11, {
+      print_frequency_ms: { default: 70 },
+      print_step: { default: 1 },
+      print_strategy: "fast",
+    })
+
+    const [url, init] = mockFetch.mock.calls[1]!
+    expect(url).toBe("https://open.feishu.cn/open-apis/cardkit/v1/cards/card-123/settings")
+    expect(init.method).toBe("PATCH")
+
+    const body = JSON.parse(init.body as string)
+    expect(body.sequence).toBe(11)
+    expect(body.uuid).toBe("r_card-123_11")
+
+    const settings = JSON.parse(body.settings)
+    expect(settings.config.streaming_mode).toBe(true)
+    expect(settings.config.streaming_config.print_strategy).toBe("fast")
+  })
+
+  it("pauses streaming before an interaction", async () => {
+    queueResponses(tokenResponse(), okResponse())
+
+    await client.pauseStreaming("card-123", "等待用户操作", 12)
+
+    const [url, init] = mockFetch.mock.calls[1]!
+    expect(url).toBe("https://open.feishu.cn/open-apis/cardkit/v1/cards/card-123/settings")
+    const body = JSON.parse(init.body as string)
+    expect(body.uuid).toBe("p_card-123_12")
+    expect(JSON.parse(body.settings).config.streaming_mode).toBe(false)
+  })
+
+  it("inserts and deletes interactive elements", async () => {
+    queueResponses(tokenResponse(), okResponse(), okResponse())
+    const elements = [{ tag: "markdown", content: "请选择", element_id: "interaction_text" }]
+
+    await client.insertElements("card-123", elements, 13, "answer")
+    await client.deleteElement("card-123", "interaction_text", 14)
+
+    const insertBody = JSON.parse(mockFetch.mock.calls[1]![1].body as string)
+    expect(mockFetch.mock.calls[1]![0]).toBe(
+      "https://open.feishu.cn/open-apis/cardkit/v1/cards/card-123/elements",
+    )
+    expect(insertBody.type).toBe("insert_after")
+    expect(insertBody.target_element_id).toBe("answer")
+    expect(JSON.parse(insertBody.elements)).toEqual(elements)
+    expect(mockFetch.mock.calls[2]![0]).toBe(
+      "https://open.feishu.cn/open-apis/cardkit/v1/cards/card-123/elements/interaction_text",
+    )
+    expect(mockFetch.mock.calls[2]![1].method).toBe("DELETE")
+  })
+
   // ── Error handling ──
 
   it("throws CardKitError on non-zero response code", async () => {
@@ -124,6 +183,41 @@ describe("CardKitClient", () => {
       expect((err as CardKitError).code).toBe(230001)
       expect((err as CardKitError).message).toBe("Card creation failed")
     }
+  })
+
+  it("retries a rate-limited request with the same idempotency body", async () => {
+    client = new CardKitClient({
+      appId: "app-id",
+      appSecret: "app-secret",
+      retryDelaysMs: [0],
+    })
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(tokenResponse()))
+      .mockResolvedValueOnce(jsonResponse({ code: 1, msg: "rate limited" }, 429, { "retry-after": "0" }))
+      .mockResolvedValueOnce(jsonResponse(okResponse()))
+
+    await client.updateElement("card-123", "content", "latest", 7)
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(mockFetch.mock.calls[1]![1].body).toBe(mockFetch.mock.calls[2]![1].body)
+  })
+
+  it("aborts and rejects a request that exceeds its timeout", async () => {
+    client = new CardKitClient({
+      appId: "app-id",
+      appSecret: "app-secret",
+      requestTimeoutMs: 5,
+      retryDelaysMs: [],
+    })
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(tokenResponse()))
+      .mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")))
+      }))
+
+    await expect(client.updateElement("card-123", "content", "latest", 7)).rejects.toMatchObject({
+      name: "AbortError",
+    })
   })
 
   // ── Token refresh on 401/expired ──

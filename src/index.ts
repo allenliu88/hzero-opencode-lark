@@ -31,6 +31,7 @@ import { SubAgentTracker } from "./streaming/subagent-tracker.js"
 import { createMessageHandler } from "./handler/message-handler.js"
 import { createStreamingBridge } from "./handler/streaming-integration.js"
 import { createCommandHandler } from "./handler/command-handler.js"
+import { buildCommandSelectedCard } from "./feishu/interactive-card-response.js"
 import { createOutboundMediaHandler } from "./handler/outbound-media.js"
 import { createSessionObserver } from "./streaming/session-observer.js"
 import { addListener, removeListener } from "./utils/event-listeners.js"
@@ -39,6 +40,7 @@ import { createSubAgentCardHandler } from "./streaming/subagent-card.js"
 import { createInteractiveHandler } from "./handler/interactive-handler.js"
 import { createInteractivePoller } from "./handler/interactive-poller.js"
 import { createInteractiveCardRegistry } from "./feishu/interactive-card-registry.js"
+import { createEmbeddedInteractionRegistry } from "./feishu/embedded-interaction-registry.js"
 import { createFeishuGateway } from "./feishu/webhook-server.js"
 import { FeishuPlugin } from "./channel/feishu/feishu-plugin.js"
 import { ChannelManager } from "./channel/manager.js"
@@ -152,6 +154,7 @@ async function main(): Promise<void> {
     serverUrl,
     db: db.sessions,
     defaultAgent: config.defaultAgent,
+    autoDiscoverTui: config.session.autoDiscoverTui,
   })
 
   // Validate stored session mappings against the running opencode server
@@ -174,6 +177,8 @@ async function main(): Promise<void> {
   const eventListeners: EventListenerMap = new Map()
   const seenInteractiveIds = new ExpiringSet<string>(30 * 60 * 1000, 2 * 60 * 1000)
   const interactiveCardRegistry = createInteractiveCardRegistry()
+  const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
+  const activeStreamingSessions = new Set<string>()
 
   const eventProcessor = new EventProcessor({ ownedSessions, logger })
 
@@ -185,12 +190,15 @@ async function main(): Promise<void> {
   })
 
   const streamingBridge = createStreamingBridge({
+    serverUrl,
     cardkitClient,
     feishuClient,
     subAgentTracker,
     logger,
     seenInteractiveIds,
     interactiveCardRegistry,
+    embeddedInteractionRegistry,
+    activeSessions: activeStreamingSessions,
     outboundMedia,
   })
 
@@ -240,7 +248,9 @@ async function main(): Promise<void> {
   const interactiveHandler = createInteractiveHandler({
     serverUrl,
     logger,
+    feishuClient,
     interactiveCardRegistry,
+    embeddedInteractionRegistry,
   })
 
   const interactivePoller = createInteractivePoller({
@@ -250,8 +260,11 @@ async function main(): Promise<void> {
     getChatForSession: (sessionId) => observer.getChatForSession(sessionId),
     seenInteractiveIds,
     interactiveCardRegistry,
+    embeddedInteractionRegistry,
+    activeSessions: activeStreamingSessions,
   })
   interactivePoller.start()
+  const handledCommandMessages = new Set<string>()
 
   const handleCardAction = async (action: FeishuCardAction) => {
     const actionType = action.action?.value?.action
@@ -266,6 +279,19 @@ async function main(): Promise<void> {
       if (cmd) {
         const chatId = action.open_chat_id
         const messageId = action.open_message_id
+        if (handledCommandMessages.has(messageId)) {
+          logger.info(`Ignoring duplicate command selection for message ${messageId}`)
+          return
+        }
+        handledCommandMessages.add(messageId)
+        try {
+          await feishuClient.updateMessage(
+            messageId,
+            JSON.stringify(buildCommandSelectedCard(cmd)),
+          )
+        } catch (err) {
+          logger.warn(`Failed to lock command menu ${messageId}: ${err}`)
+        }
         // For card callbacks, use chatId as feishuKey (best-effort for p2p)
         await commandHandler(chatId, chatId, messageId, cmd)
       }
@@ -286,7 +312,9 @@ async function main(): Promise<void> {
       for await (const event of events.stream) {
         const eventType = (event as Record<string, unknown>)?.type as string | undefined
         const props = (event as Record<string, unknown>)?.properties as Record<string, unknown> | undefined
-        const sessionID = props?.sessionID ?? (props?.part && typeof props.part === "object" ? (props.part as Record<string, unknown>).sessionID : undefined)
+        const sessionID = props?.sessionID
+          ?? (props?.part && typeof props.part === "object" ? (props.part as Record<string, unknown>).sessionID : undefined)
+          ?? (props?.info && typeof props.info === "object" ? (props.info as Record<string, unknown>).sessionID : undefined)
         if (eventType) {
           logger.debug(`SSE: ${eventType} session=${sessionID ?? "n/a"}`)
         }

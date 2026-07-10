@@ -32,6 +32,8 @@ export interface FeishuCardAction {
   action: {
     tag: string
     value: Record<string, string>
+    form_value?: Record<string, unknown>
+    name?: string
   }
   open_message_id: string
   open_chat_id: string

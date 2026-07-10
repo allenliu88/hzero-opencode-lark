@@ -57,6 +57,10 @@ function createMockCardKitClient(): CardKitClient {
     createCard: vi.fn().mockResolvedValue("card_e2e_1"),
     updateElement: vi.fn().mockResolvedValue(undefined),
     closeStreaming: vi.fn().mockResolvedValue(undefined),
+    renewStreaming: vi.fn().mockResolvedValue(undefined),
+    pauseStreaming: vi.fn().mockResolvedValue(undefined),
+    insertElements: vi.fn().mockResolvedValue(undefined),
+    deleteElement: vi.fn().mockResolvedValue(undefined),
   } as unknown as CardKitClient
 }
 
@@ -208,8 +212,7 @@ describe("E2E Smoke Tests", () => {
 
     await handlerPromise
 
-    // With lazy card creation, card is only created when a ToolStateChange event arrives.
-    // Since this test only sends text deltas, no card is created.
+    // Fast text-only replies finish before the delayed console threshold and use a normal reply.
     expect(feishuClient.replyMessage).toHaveBeenCalledWith(
       "msg-e2e-1",
       expect.objectContaining({ msg_type: "interactive" }),
@@ -219,7 +222,8 @@ describe("E2E Smoke Tests", () => {
     const card = JSON.parse(replyArgs?.[1]?.content as string)
     expect(card.elements?.[0]?.content).toBe("Hello World!")
 
-    // With lazy card creation, card was never created (no tool events), so no close needed
+    expect(cardkitClient.createCard).not.toHaveBeenCalled()
+    expect(cardkitClient.closeStreaming).not.toHaveBeenCalled()
 
     // Verify listener was cleaned up
     expect(eventListeners.size).toBe(0)

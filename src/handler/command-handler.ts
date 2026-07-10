@@ -143,9 +143,94 @@ function buildHelpCard(): Record<string, unknown> {
             type: "danger",
             value: { action: "command_execute", command: "/abort" },
           },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "🧪 Loading 测试" },
+            value: { action: "command_execute", command: "/test-loading" },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "🧪 Loading 2.0" },
+            value: { action: "command_execute", command: "/test-loading-v2" },
+          },
         ],
       },
     ],
+  }
+}
+
+function buildLoadingTestCard(): Record<string, unknown> {
+  return {
+    config: {
+      wide_screen_mode: true,
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: "工具执行中，请稍候",
+      },
+      template: "yellow",
+    },
+    elements: [
+      {
+        tag: "div",
+        loading: true,
+        text: {
+          tag: "plain_text",
+          content: "正在调用外部工具处理数据，请勿关闭卡片\n执行耗时约 5~20 秒",
+        },
+      },
+      {
+        tag: "note",
+        elements: [
+          {
+            tag: "plain_text",
+            content: "提示：若长时间无响应可重新发起任务",
+          },
+        ],
+      },
+    ],
+  }
+}
+
+function buildLoadingTestV2Card(): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    config: {
+      width_mode: "fill",
+      update_multi: true,
+    },
+    header: {
+      title: {
+        tag: "plain_text",
+        content: "工具执行中，请稍候（2.0）",
+      },
+      template: "yellow",
+    },
+    body: {
+      elements: [
+        {
+          tag: "div",
+          element_id: "loading_div",
+          loading: true,
+          text: {
+            tag: "plain_text",
+            element_id: "loading_text",
+            content: "正在调用外部工具处理数据，请勿关闭卡片\n执行耗时约 5~20 秒",
+          },
+        },
+        {
+          tag: "div",
+          element_id: "loading_note",
+          text: {
+            tag: "plain_text",
+            content: "提示：若长时间无响应可重新发起任务",
+            text_size: "notation",
+            text_color: "secondary",
+          },
+        },
+      ],
+    },
   }
 }
 
@@ -290,6 +375,22 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     })
   }
 
+  async function handleTestLoading(messageId: string): Promise<void> {
+    const card = buildLoadingTestCard()
+    await feishuClient.replyMessage(messageId, {
+      msg_type: "interactive",
+      content: JSON.stringify(card),
+    })
+  }
+
+  async function handleTestLoadingV2(messageId: string): Promise<void> {
+    const card = buildLoadingTestV2Card()
+    await feishuClient.replyMessage(messageId, {
+      msg_type: "interactive",
+      content: JSON.stringify(card),
+    })
+  }
+
   return async function handleCommand(
     feishuKey: string,
     chatId: string,
@@ -331,6 +432,16 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         case "/":
         case "/help":
           await handleHelp(chatId, messageId)
+          return true
+
+        case "/test-loading":
+        case "/loading-test":
+          await handleTestLoading(messageId)
+          return true
+
+        case "/test-loading-v2":
+        case "/loading-test-v2":
+          await handleTestLoadingV2(messageId)
           return true
 
         default:

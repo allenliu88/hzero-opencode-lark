@@ -10,6 +10,20 @@
 
 ---
 
+## 快速开发调试
+
+```shell
+## Session 1
+nvm use 20
+opencode serve --hostname 0.0.0.0 --port 54096
+
+## Session 2
+cd hzero-opencode-lark
+nvm use 20
+OPENCODE_SERVER_URL=http://0.0.0.0:54096 bun run dev ## 开发模式
+OPENCODE_SERVER_URL=http://0.0.0.0:54096 bun run start ## 生产模式
+```
+
 ## 功能特性
 
 - **实时桥接** — 飞书消息即时出现在 opencode TUI，agent 回复以动态卡片形式推送回飞书。

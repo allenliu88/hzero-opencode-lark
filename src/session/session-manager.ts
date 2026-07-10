@@ -8,6 +8,7 @@ interface SessionManagerOptions {
   serverUrl: string
   db: Database
   defaultAgent: string
+  autoDiscoverTui?: boolean
 }
 
 export interface SessionManager {
@@ -35,7 +36,7 @@ interface TuiSession {
 export function createSessionManager(
   options: SessionManagerOptions,
 ): SessionManager {
-  const { serverUrl, db, defaultAgent } = options
+  const { serverUrl, db, defaultAgent, autoDiscoverTui = false } = options
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS feishu_sessions (
@@ -142,7 +143,7 @@ export function createSessionManager(
       const agentName = agent ?? defaultAgent
       logger.info(`Resolving session for ${feishuKey} (agent: ${agentName})`)
 
-      const discovered = await discoverTuiSession()
+      const discovered = autoDiscoverTui ? await discoverTuiSession() : null
 
       if (discovered) {
         const now = Date.now()
@@ -227,5 +228,4 @@ export function createSessionManager(
     },
   }
 }
-
 

@@ -20,6 +20,10 @@ const ProgressConfigSchema = z.object({
   maxDebounceMs: z.number().int().positive().default(3000),
 })
 
+const SessionConfigSchema = z.object({
+  autoDiscoverTui: z.boolean().default(false),
+})
+
 
 const CronJobSchema = z.object({
   name: z.string(),
@@ -42,6 +46,7 @@ const AppConfigSchema = z.object({
   defaultAgent: z.string().default("build"),
   dataDir: z.string().default("./data"),
   progress: ProgressConfigSchema.optional(),
+  session: SessionConfigSchema.optional().default({ autoDiscoverTui: false }),
   cron: CronConfigSchema.optional(),
   heartbeat: HeartbeatConfigSchema.optional(),
   messageDebounceMs: z.number().int().min(0).optional().default(10000),

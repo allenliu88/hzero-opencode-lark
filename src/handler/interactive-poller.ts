@@ -10,6 +10,7 @@ import type { QuestionAsked, PermissionRequested } from "../streaming/event-proc
 import { buildQuestionCard, buildPermissionCard } from "./streaming-integration.js"
 import type { ExpiringSet } from "../utils/expiring-set.js"
 import type { InteractiveCardRegistry } from "../feishu/interactive-card-registry.js"
+import type { EmbeddedInteractionRegistry } from "../feishu/embedded-interaction-registry.js"
 import {
   extractFeishuMessageId,
   interactiveCardKey,
@@ -31,6 +32,8 @@ export interface InteractivePollerDeps {
   /** Shared dedup set — IDs added here are also checked by SSE handlers */
   seenInteractiveIds: ExpiringSet<string>
   interactiveCardRegistry?: InteractiveCardRegistry
+  embeddedInteractionRegistry?: EmbeddedInteractionRegistry
+  activeSessions?: ReadonlySet<string>
 }
 
 export interface InteractivePoller {
@@ -113,6 +116,7 @@ export function createInteractivePoller(
     for (const q of questions as PendingQuestion[]) {
       if (!q.id || !q.sessionID || !Array.isArray(q.questions)) continue
       pendingIds.add(q.id)
+      if (deps.activeSessions?.has(q.sessionID)) continue
       const cardKey = interactiveCardKey("question", q.id)
       if (seenInteractiveIds.has(cardKey)) continue
 
@@ -183,6 +187,7 @@ export function createInteractivePoller(
     for (const p of permissions as PendingPermission[]) {
       if (!p.id || !p.sessionID) continue
       pendingIds.add(p.id)
+      if (deps.activeSessions?.has(p.sessionID)) continue
       const cardKey = interactiveCardKey("permission", p.id)
       if (seenInteractiveIds.has(cardKey)) continue
 
@@ -239,6 +244,19 @@ export function createInteractivePoller(
     pendingQuestions: Set<string> | null,
     pendingPermissions: Set<string> | null,
   ): Promise<void> {
+    for (const interaction of deps.embeddedInteractionRegistry?.list() ?? []) {
+      const stillPending = interaction.kind === "question"
+        ? pendingQuestions?.has(interaction.requestId)
+        : pendingPermissions?.has(interaction.requestId)
+      if (stillPending !== false) continue
+      try {
+        await interaction.resolve()
+        deps.embeddedInteractionRegistry?.untrack(interaction.kind, interaction.requestId)
+      } catch (err) {
+        logger.warn(`Poller embedded ${interaction.kind} update failed: ${err}`)
+      }
+    }
+
     const trackedCards = deps.interactiveCardRegistry?.list() ?? []
     if (trackedCards.length === 0) return
 

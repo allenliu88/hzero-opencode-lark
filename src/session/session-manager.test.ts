@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { Database } from "bun:sqlite"
-import { createSessionManager } from "./session-manager.js"
+import { createSessionManager as createSessionManagerImpl } from "./session-manager.js"
 import type { SessionManager } from "./session-manager.js"
 
 const SERVER_URL = "http://127.0.0.1:4096"
@@ -8,6 +8,12 @@ const DEFAULT_AGENT = "claude"
 
 function createTestDb(): Database {
   return new Database(":memory:")
+}
+
+function createSessionManager(
+  options: Parameters<typeof createSessionManagerImpl>[0],
+): SessionManager {
+  return createSessionManagerImpl({ ...options, autoDiscoverTui: true })
 }
 
 describe("session-manager", () => {
@@ -35,6 +41,25 @@ describe("session-manager", () => {
   }
 
   describe("getOrCreate", () => {
+    it("creates a clean session by default instead of discovering a TUI session", async () => {
+      const createdSessionId = "ses-clean-123"
+      mockFetch(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url
+        if ((init?.method ?? "GET") === "POST" && url.endsWith("/session")) {
+          return new Response(JSON.stringify({ id: createdSessionId }), { status: 200 })
+        }
+        return new Response("unexpected discovery", { status: 500 })
+      })
+
+      sm = createSessionManagerImpl({ serverUrl: SERVER_URL, db, defaultAgent: DEFAULT_AGENT })
+      const result = await sm.getOrCreate("chat-clean")
+
+      expect(result).toBe(createdSessionId)
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]?.method).toBe("POST")
+      expect(sm.getSession("chat-clean")?.is_bound).toBe(0)
+    })
+
     it("discovers existing TUI session and returns its ID", async () => {
       const tuiSessionId = "ses-tui-abc"
       mockFetch(async (input) => {

@@ -33,6 +33,7 @@ export interface FeishuApiClient {
   sendMessage(chatId: string, body: FeishuMessageBody): Promise<FeishuApiResponse>
   replyMessage(messageId: string, body: FeishuMessageBody): Promise<FeishuApiResponse>
   updateMessage(messageId: string, content: string): Promise<FeishuApiResponse>
+  deleteMessage(messageId: string): Promise<FeishuApiResponse>
   addReaction(messageId: string, emojiType: string): Promise<FeishuApiResponse>
   deleteReaction(messageId: string, reactionId: string): Promise<FeishuApiResponse>
   getMessage(messageId: string): Promise<FeishuApiResponse>
@@ -253,6 +254,10 @@ export function createFeishuApiClient(options: FeishuApiClientOptions): FeishuAp
       return apiRequest("PATCH", `/im/v1/messages/${messageId}`, {
         content,
       })
+    },
+
+    async deleteMessage(messageId) {
+      return apiRequest("DELETE", `/im/v1/messages/${messageId}`)
     },
 
 
