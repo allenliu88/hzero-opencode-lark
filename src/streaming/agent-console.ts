@@ -16,6 +16,7 @@ export interface AgentConsoleOptions {
   cardkitClient: CardKitClient
   feishuClient: FeishuApiClient
   chatId: string
+  replyToMessageId?: string
   requestText?: string
 }
 
@@ -102,6 +103,7 @@ export class AgentConsoleSession {
   private readonly cardkitClient: CardKitClient
   private readonly feishuClient: FeishuApiClient
   private readonly chatId: string
+  private readonly replyToMessageId?: string
   private readonly requestText?: string
 
   private state: CardState | null = null
@@ -131,6 +133,7 @@ export class AgentConsoleSession {
     this.cardkitClient = options.cardkitClient
     this.feishuClient = options.feishuClient
     this.chatId = options.chatId
+    this.replyToMessageId = options.replyToMessageId
     this.requestText = options.requestText
   }
 
@@ -155,7 +158,7 @@ export class AgentConsoleSession {
     const cardJson: CardKitSchema = {
       schema: "2.0",
       header: {
-        title: { tag: "plain_text", content: "飞码智能体" },
+        title: { tag: "plain_text", content: "🧠 飞码智能体" },
         template: "blue",
       },
       config: {
@@ -173,10 +176,13 @@ export class AgentConsoleSession {
     }
 
     const cardId = await this.cardkitClient.createCard(cardJson)
-    const result = await this.feishuClient.sendMessage(this.chatId, {
-      msg_type: "interactive",
+    const cardMessage = {
+      msg_type: "interactive" as const,
       content: JSON.stringify({ type: "card", data: { card_id: cardId } }),
-    })
+    }
+    const result = this.replyToMessageId
+      ? await this.feishuClient.replyMessage(this.replyToMessageId, cardMessage)
+      : await this.feishuClient.sendMessage(this.chatId, cardMessage)
 
     const messageId = result.data?.["message_id"] as string | undefined
     if (!messageId) {
@@ -236,7 +242,7 @@ export class AgentConsoleSession {
       id: this.nextFallbackId("task", description),
       kind: "task",
       status: "running",
-      label: agent ? `启动子任务 ${agent}` : "启动子任务",
+      label: agent ? `执行子任务 ${agent}` : "执行子任务",
       detail: truncate(description),
       startedAt: Date.now(),
     })
@@ -804,7 +810,7 @@ function renderItem(item: AgentConsoleItem): string {
       : item.status === "done"
         ? `✓ 已${item.label}${detail}`
         : item.status === "pending"
-          ? `等待${item.label}${detail}`
+          ? `正在${item.label}${detail}`
         : `正在${item.label}${detail}`
     return `${prefix} · ${formatClock(item.interactionStartedAt)}`
   }
@@ -821,7 +827,7 @@ function renderItem(item: AgentConsoleItem): string {
     case "waiting":
       return `? ${item.label}${detail} · 已等待 ${formatElapsed(elapsedMs, false)}`
     case "pending":
-      return `○ 等待${item.label}${detail}`
+      return `○ 正在${item.label}${detail}`
   }
 }
 
@@ -896,7 +902,7 @@ function describeToolEvent(
   if (["edit", "apply_patch"].includes(normalized)) return { kind: "edit", label: "修改", detail }
   if (["grep", "search", "glob", "find"].includes(normalized)) return { kind: "search", label: "搜索", detail }
   if (["bash", "shell"].includes(normalized)) return { kind: "bash", label: "执行命令", detail }
-  if (normalized === "task") return { kind: "task", label: "启动子任务", detail }
+  if (normalized === "task") return { kind: "task", label: "执行子任务", detail }
   return { kind: "message", label: `执行 ${toolName}`, detail }
 }
 

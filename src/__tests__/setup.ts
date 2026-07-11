@@ -49,8 +49,8 @@ export function createMockFetch() {
  */
 export function createMockFeishuClient(): FeishuApiClient {
   return {
-    sendMessage: vi.fn(),
-    replyMessage: vi.fn(),
+    sendMessage: vi.fn().mockResolvedValue({ code: 0, msg: "ok", data: { message_id: "msg_mock" } }),
+    replyMessage: vi.fn().mockResolvedValue({ code: 0, msg: "ok", data: { message_id: "msg_mock" } }),
     updateMessage: vi.fn(),
     deleteMessage: vi.fn(),
     addReaction: vi.fn(),

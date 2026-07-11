@@ -721,6 +721,7 @@ export function createMessageHandler(
             },
             event.message_id,
             reactionId,
+            userText,
           )
         } catch (err) {
           // Always clean up on error
@@ -1004,6 +1005,7 @@ export function createMessageHandler(
             },
             reactionMsgId,
             reactionId,
+            mergedText,
           )
         } catch (err) {
           if (ownershipListener) removeListener(eventListeners, sid, ownershipListener)

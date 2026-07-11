@@ -41,7 +41,7 @@ export function buildInteractiveCallbackResponse(
     return {
       toast: {
         type: isRejected ? "warning" : "success",
-        content: `${isRejected ? "❌" : "✅"} ${label}`,
+        content: label,
       },
       ...(!embedded ? { card: {
         type: "raw",

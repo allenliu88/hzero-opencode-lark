@@ -117,7 +117,7 @@ describe("interactive-card-response", () => {
     })
 
     expect(response).toEqual({
-      toast: { type: "warning", content: "❌ Rejected" },
+      toast: { type: "warning", content: "Rejected" },
       card: {
         type: "raw",
         data: {
@@ -131,6 +131,27 @@ describe("interactive-card-response", () => {
           ],
         },
       },
+    })
+  })
+
+  it("omits status icons from permission callback toasts", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: {
+        tag: "button",
+        value: {
+          action: "permission_reply",
+          requestId: "p-1",
+          reply: "once",
+          embedded: "true",
+        },
+      },
+      open_message_id: "msg-1",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response).toEqual({
+      toast: { type: "success", content: "Allowed (once)" },
     })
   })
 

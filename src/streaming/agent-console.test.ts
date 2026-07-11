@@ -31,10 +31,16 @@ function createSession() {
     msg: "ok",
     data: { message_id: "msg_456" },
   })
+  ;(feishuClient.replyMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+    code: 0,
+    msg: "ok",
+    data: { message_id: "msg_456" },
+  })
   const session = new AgentConsoleSession({
     cardkitClient,
     feishuClient,
     chatId: "chat_789",
+    replyToMessageId: "msg_original",
     requestText: "优化飞书交互体验",
   })
   return { session, cardkitClient, feishuClient }
@@ -56,17 +62,18 @@ describe("AgentConsoleSession", () => {
 
     const schema = cardkitClient.createCard.mock.calls[0]![0] as CardKitSchema
     expect(schema.schema).toBe("2.0")
-    expect(schema.header?.title.content).toBe("飞码智能体")
+    expect(schema.header?.title.content).toBe("🧠 飞码智能体")
     expect(schema.config.streaming_mode).toBe(true)
     expect(schema.config.summary.content).toBe("飞码智能体执行中")
     expect(schema.body.elements[0]?.content).toContain("正在分析请求")
     expect(schema.body.elements[0]?.content).toContain("已用时 0 秒")
     expect(schema.body.elements[0]?.element_id).toBe("progress")
     expect(schema.body.elements[1]).toEqual({ tag: "markdown", content: "", element_id: "answer" })
-    expect(feishuClient.sendMessage).toHaveBeenCalledWith("chat_789", {
+    expect(feishuClient.replyMessage).toHaveBeenCalledWith("msg_original", {
       msg_type: "interactive",
       content: JSON.stringify({ type: "card", data: { card_id: "card_123" } }),
     })
+    expect(feishuClient.sendMessage).not.toHaveBeenCalled()
   })
 
   it("starts only once when called concurrently", async () => {
@@ -82,7 +89,7 @@ describe("AgentConsoleSession", () => {
     await Promise.all([first, second])
 
     expect(cardkitClient.createCard).toHaveBeenCalledOnce()
-    expect(feishuClient.sendMessage).toHaveBeenCalledOnce()
+    expect(feishuClient.replyMessage).toHaveBeenCalledOnce()
   })
 
   it("updates elapsed time while analyzing", async () => {
@@ -138,7 +145,7 @@ describe("AgentConsoleSession", () => {
     await vi.advanceTimersByTimeAsync(300)
     await pending
     let questionContent = cardkitClient.updateElement.mock.calls.at(-1)?.[2] as string
-    expect(questionContent).toContain("等待执行 question Asked 1 question · 08:15:30")
+    expect(questionContent).toContain("正在执行 question Asked 1 question · 08:15:30")
 
     await vi.advanceTimersByTimeAsync(500)
     const running = session.setToolStatus({

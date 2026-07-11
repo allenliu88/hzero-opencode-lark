@@ -47,6 +47,7 @@ export interface StreamingBridge {
     onComplete: (text: string) => void,
     messageId: string,
     reactionId: string | null,
+    requestText?: string,
   ): Promise<void>
 }
 
@@ -85,6 +86,7 @@ export function createStreamingBridge(
       onComplete: (text: string) => void,
       messageId: string,
       reactionId: string | null,
+      requestText?: string,
     ): Promise<void> {
       const previous = sessionTails.get(sessionId) ?? Promise.resolve()
       let release!: () => void
@@ -111,6 +113,8 @@ export function createStreamingBridge(
           cardkitClient,
           feishuClient,
           chatId,
+          replyToMessageId: messageId,
+          requestText,
         })
         cardStartPromise = card.start()
           .then(() => {

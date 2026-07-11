@@ -144,7 +144,7 @@ describe("createStreamingBridge", () => {
           msg: "ok",
           data: { message_id: "msg-question" },
         }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -186,7 +186,8 @@ describe("createStreamingBridge", () => {
     expect(JSON.stringify(inserted)).toContain("question_answer")
     expect(embeddedInteractionRegistry.get("question", "q-bridge")).toBeDefined()
     expect(deps.interactiveCardRegistry?.list()).toEqual([])
-    expect(deps.feishuClient.sendMessage).toHaveBeenCalledTimes(1)
+    expect(deps.feishuClient.replyMessage).toHaveBeenCalledTimes(1)
+    expect(deps.feishuClient.sendMessage).not.toHaveBeenCalled()
 
     listener({
       type: "session.status",
@@ -203,7 +204,7 @@ describe("createStreamingBridge", () => {
           code: 0,
           data: { message_id: "msg_456" },
         }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -476,7 +477,7 @@ describe("createStreamingBridge", () => {
       feishuClient: {
         ...createMockFeishuClient(),
         sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
       cardCreationDelayMs: 10_000,
     })
@@ -525,7 +526,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const deps = makeDeps({
       feishuClient: mockFeishu,
@@ -572,7 +573,7 @@ describe("createStreamingBridge", () => {
     const deps = makeDeps({
       feishuClient: {
         ...createMockFeishuClient(),
-        sendMessage: vi.fn().mockRejectedValue(new Error("Feishu API down")),
+        replyMessage: vi.fn().mockRejectedValue(new Error("Feishu API down")),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -595,7 +596,7 @@ describe("createStreamingBridge", () => {
 
     const listener = [...eventListeners.get("ses-1")!][0]!
 
-    // Inject ToolStateChange to trigger card creation, which will attempt sendMessage and fail
+    // Inject ToolStateChange to trigger card creation, which will attempt replyMessage and fail
     listener({
       type: "message.part.updated",
       properties: {
@@ -638,7 +639,7 @@ describe("createStreamingBridge", () => {
           code: 0,
           data: { message_id: "msg_456" },
         }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -696,7 +697,7 @@ describe("createStreamingBridge", () => {
           code: 0,
           data: { message_id: "msg_456" },
         }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -760,7 +761,7 @@ describe("createStreamingBridge", () => {
           code: 0,
           data: { message_id: "msg_456" },
         }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
     })
     const bridge = createStreamingBridge(deps)
@@ -822,7 +823,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const deps = makeDeps({ feishuClient: mockFeishu })
     const bridge = createStreamingBridge(deps)
@@ -887,7 +888,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const mockCardKit = createMockCardKitClient()
     const deps = makeDeps({
@@ -932,7 +933,7 @@ describe("createStreamingBridge", () => {
     })
     await handlePromise
 
-    expect(mockFeishu.replyMessage).not.toHaveBeenCalled()
+    expect(mockFeishu.replyMessage).toHaveBeenCalledTimes(1)
     expect(onComplete).toHaveBeenCalledWith("流式答案")
     vi.useRealTimers()
   })
@@ -945,7 +946,7 @@ describe("createStreamingBridge", () => {
       feishuClient: {
         ...createMockFeishuClient(),
         sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
       cardCreationDelayMs: 0,
     })
@@ -1004,7 +1005,7 @@ describe("createStreamingBridge", () => {
       feishuClient: {
         ...createMockFeishuClient(),
         sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
-        replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       },
       cardCreationDelayMs: 0,
     })
@@ -1084,7 +1085,7 @@ describe("createStreamingBridge", () => {
     const mockFeishu = {
       ...createMockFeishuClient(),
       sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const mockCardKit = createMockCardKitClient()
     const deps = makeDeps({
@@ -1120,7 +1121,10 @@ describe("createStreamingBridge", () => {
     await vi.advanceTimersByTimeAsync(500)
 
     expect((mockCardKit as any).createCard).not.toHaveBeenCalled()
-    expect(mockFeishu.replyMessage).toHaveBeenCalledOnce()
+    expect(mockFeishu.replyMessage).toHaveBeenCalledTimes(1)
+    const finalReply = mockFeishu.replyMessage.mock.calls[0]!
+    const finalCard = JSON.parse((finalReply[1] as { content: string }).content)
+    expect(finalCard.elements?.[0]?.content).toBe("快速答案")
     vi.useRealTimers()
   })
 
@@ -1129,7 +1133,7 @@ describe("createStreamingBridge", () => {
     const mockFeishu = {
       ...createMockFeishuClient(),
       sendMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const deps = makeDeps({
       cardkitClient: createMockCardKitClient(),
@@ -1164,7 +1168,10 @@ describe("createStreamingBridge", () => {
     })
     await handlePromise
 
-    expect(mockFeishu.replyMessage).toHaveBeenCalledOnce()
+    expect(mockFeishu.replyMessage).toHaveBeenCalledTimes(2)
+    const finalReply = mockFeishu.replyMessage.mock.calls[1]!
+    const finalCard = JSON.parse((finalReply[1] as { content: string }).content)
+    expect(finalCard.elements?.[0]?.content).toContain("长")
     vi.useRealTimers()
   })
 
@@ -1175,7 +1182,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const deps = makeDeps({ feishuClient: mockFeishu })
     const bridge = createStreamingBridge(deps)
@@ -1245,7 +1252,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
     }
     const deps = makeDeps({ feishuClient: mockFeishu })
     const bridge = createStreamingBridge(deps)
@@ -1300,7 +1307,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       deleteReaction: vi.fn().mockResolvedValue({ code: 0 }),
     }
     const deps = makeDeps({ feishuClient: mockFeishu })
@@ -1366,7 +1373,7 @@ describe("createStreamingBridge", () => {
         code: 0,
         data: { message_id: "msg_456" },
       }),
-      replyMessage: vi.fn().mockResolvedValue({ code: 0 }),
+      replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
       deleteReaction: vi.fn().mockResolvedValue({ code: 0 }),
     }
     const deps = makeDeps({ feishuClient: mockFeishu })
