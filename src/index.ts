@@ -41,6 +41,7 @@ import { createInteractiveHandler } from "./handler/interactive-handler.js"
 import { createInteractivePoller } from "./handler/interactive-poller.js"
 import { createInteractiveCardRegistry } from "./feishu/interactive-card-registry.js"
 import { createEmbeddedInteractionRegistry } from "./feishu/embedded-interaction-registry.js"
+import { AgentConsoleRegistry } from "./streaming/agent-console-registry.js"
 import { createFeishuGateway } from "./feishu/webhook-server.js"
 import { FeishuPlugin } from "./channel/feishu/feishu-plugin.js"
 import { ChannelManager } from "./channel/manager.js"
@@ -179,6 +180,7 @@ async function main(): Promise<void> {
   const interactiveCardRegistry = createInteractiveCardRegistry()
   const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
   const activeStreamingSessions = new Set<string>()
+  const agentConsoleRegistry = new AgentConsoleRegistry()
 
   const eventProcessor = new EventProcessor({ ownedSessions, logger })
 
@@ -199,6 +201,8 @@ async function main(): Promise<void> {
     interactiveCardRegistry,
     embeddedInteractionRegistry,
     activeSessions: activeStreamingSessions,
+    ownedSessions,
+    agentConsoleRegistry,
     outboundMedia,
   })
 
@@ -270,6 +274,11 @@ async function main(): Promise<void> {
     const actionType = action.action?.value?.action
     if (actionType === "view_subagent") {
       return subAgentCardHandler(action)
+    }
+    if (actionType === "agent_console_view_child" || actionType === "agent_console_back") {
+      const handled = await agentConsoleRegistry.handle(action)
+      if (!handled) logger.warn(`Ignored stale or invalid Agent Console action for ${action.open_message_id}`)
+      return
     }
     if (actionType === "question_answer" || actionType === "permission_reply") {
       return interactiveHandler(action)
@@ -433,6 +442,7 @@ async function main(): Promise<void> {
       disposeDebouncer()
       subAgentTracker.close()
       interactiveCardRegistry.close()
+      agentConsoleRegistry.close()
       seenInteractiveIds.close()
       dedup.close()
       db.close()

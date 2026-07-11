@@ -449,6 +449,36 @@ describe("EventProcessor", () => {
       expect(result).not.toHaveProperty("input")
       expect(result).not.toHaveProperty("output")
     })
+
+    it("preserves exact child session metadata for parallel task parts", () => {
+      const proc = makeProcessor()
+      const result = proc.processEvent({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "task-part-1",
+            sessionID: "ses-1",
+            messageID: "msg-1",
+            type: "tool",
+            callID: "call-1",
+            tool: "task",
+            state: {
+              status: "running",
+              input: { description: "Excel开发问答", subagent_type: "问答助手" },
+              metadata: { sessionId: "ses-child-1" },
+            },
+          },
+        },
+      })
+
+      expect(result).toMatchObject({
+        type: "ToolStateChange",
+        sessionId: "ses-1",
+        partId: "task-part-1",
+        toolName: "task",
+        metadata: { sessionId: "ses-child-1" },
+      })
+    })
   })
 
   describe("SubtaskDiscovered", () => {

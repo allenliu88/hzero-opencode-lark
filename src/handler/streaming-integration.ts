@@ -12,6 +12,7 @@ import type { OutboundMediaHandler } from "./outbound-media.js"
 import type { ExpiringSet } from "../utils/expiring-set.js"
 import type { InteractiveCardRegistry } from "../feishu/interactive-card-registry.js"
 import type { EmbeddedInteractionRegistry } from "../feishu/embedded-interaction-registry.js"
+import type { AgentConsoleRegistry } from "../streaming/agent-console-registry.js"
 import {
   extractFeishuMessageId,
   interactiveCardKey,
@@ -29,6 +30,8 @@ export interface StreamingBridgeDeps {
   interactiveCardRegistry?: InteractiveCardRegistry
   embeddedInteractionRegistry?: EmbeddedInteractionRegistry
   activeSessions?: Set<string>
+  ownedSessions?: Set<string>
+  agentConsoleRegistry?: AgentConsoleRegistry
   outboundMedia?: OutboundMediaHandler
   inactivityTimeoutMs?: number
   waitingInactivityTimeoutMs?: number
@@ -67,6 +70,7 @@ const WAITING_INACTIVITY_TIMEOUT_MS = 60 * 60 * 1_000
 const MAX_LIFETIME_MS = 2 * 60 * 60 * 1_000
 const CARD_CLOSE_TIMEOUT_MS = 3_000
 const CARD_CREATION_DELAY_MS = 500
+const CHILD_IDLE_GRACE_MS = 1_500
 
 // ── Factory ──
 
@@ -75,6 +79,7 @@ export function createStreamingBridge(
 ): StreamingBridge {
   const { cardkitClient, feishuClient, subAgentTracker, logger, seenInteractiveIds } = deps
   const sessionTails = new Map<string, Promise<void>>()
+  const childOwnership = new Map<string, number>()
 
   return {
     async handleMessage(
@@ -106,6 +111,8 @@ export function createStreamingBridge(
 
       let card: AgentConsoleSession | null = null
       let cardStartPromise: Promise<void> | null = null
+      const taskChildren = new Map<string, string>()
+      const taskDetails = new Map<string, { description: string; agent: string }>()
 
       const ensureCard = (): Promise<void> => {
         if (cardStartPromise) return cardStartPromise
@@ -118,6 +125,17 @@ export function createStreamingBridge(
         })
         cardStartPromise = card.start()
           .then(() => {
+            const cardMessageId = card?.cardMessageId
+            if (cardMessageId && deps.agentConsoleRegistry) {
+              deps.agentConsoleRegistry.register(cardMessageId, {
+                chatId,
+                viewTask: async (taskKey) => {
+                  const childSessionId = taskChildren.get(taskKey)
+                  if (childSessionId) await card?.viewChild(childSessionId)
+                },
+                viewParent: async () => card?.viewParent(),
+              })
+            }
             logger.info(
               `Streaming card started for session ${sessionId} in chat ${chatId}`,
             )
@@ -140,6 +158,12 @@ export function createStreamingBridge(
         let settled = false
         let syncResponseBody = ""
         let waitingForUser = false
+        let parentIdle = false
+        const childStreams = new Map<string, {
+          listener: (rawEvent: unknown) => void
+          idle: boolean
+          idleFallbackTimer: ReturnType<typeof setTimeout> | null
+        }>()
         let inactivityTimer: ReturnType<typeof setTimeout> | null = null
         let cardCreationTimer: ReturnType<typeof setTimeout> | null = null
         const getResponseText = (): string => stripThinkingContent([...textParts.values()].join("")).trim()
@@ -187,6 +211,17 @@ export function createStreamingBridge(
         const complete = async (text: string, closeReason?: string): Promise<void> => {
           clearTimers()
           removeListener(eventListeners, sessionId, myListener)
+          for (const [childSessionId, child] of childStreams) {
+            removeListener(eventListeners, childSessionId, child.listener)
+            if (child.idleFallbackTimer) clearTimeout(child.idleFallbackTimer)
+            const owners = (childOwnership.get(childSessionId) ?? 1) - 1
+            if (owners <= 0) {
+              childOwnership.delete(childSessionId)
+              deps.ownedSessions?.delete(childSessionId)
+            } else {
+              childOwnership.set(childSessionId, owners)
+            }
+          }
           const cardCompleted = await closeCard(text, closeReason)
           if (!cardCompleted || Buffer.byteLength(text, "utf8") > ANSWER_ELEMENT_MAX_BYTES) {
             try {
@@ -228,6 +263,51 @@ export function createStreamingBridge(
             ? (deps.waitingInactivityTimeoutMs ?? WAITING_INACTIVITY_TIMEOUT_MS)
             : (deps.inactivityTimeoutMs ?? INACTIVITY_TIMEOUT_MS))
           inactivityTimer.unref?.()
+        }
+
+        const maybeComplete = (): void => {
+          if (settled || !parentIdle) return
+          if ([...childStreams.values()].some((child) => !child.idle)) return
+          settled = true
+          void complete(getResponseText() || "（无回复）")
+        }
+
+        const attachChild = (
+          taskKey: string,
+          childSessionId: string,
+        ): void => {
+          taskChildren.set(taskKey, childSessionId)
+          if (childStreams.has(childSessionId)) return
+          deps.ownedSessions?.add(childSessionId)
+          childOwnership.set(childSessionId, (childOwnership.get(childSessionId) ?? 0) + 1)
+          const child = {
+            idle: false,
+            idleFallbackTimer: null as ReturnType<typeof setTimeout> | null,
+            listener: (_rawEvent: unknown): void => {},
+          }
+          child.listener = (rawEvent: unknown): void => {
+            const action = eventProcessor.processEvent(rawEvent)
+            if (!action || action.sessionId !== childSessionId) return
+            resetInactivityTimer()
+            if (action.type === "TextDelta") {
+              card?.markChildOutput(childSessionId).catch((err) => logger.warn(`child output update failed: ${err}`))
+            } else if (action.type === "ToolStateChange") {
+              card?.setChildToolStatus(childSessionId, {
+                partId: action.partId,
+                name: action.toolName,
+                state: action.state as "pending" | "running" | "completed" | "error",
+                title: action.title,
+                input: action.input,
+              }).catch((err) => logger.warn(`child tool update failed: ${err}`))
+            } else if (action.type === "SessionIdle") {
+              child.idle = true
+              if (child.idleFallbackTimer) clearTimeout(child.idleFallbackTimer)
+              card?.setChildStatus(childSessionId, "completed").catch(() => {})
+              maybeComplete()
+            }
+          }
+          childStreams.set(childSessionId, child)
+          addListener(eventListeners, childSessionId, child.listener)
         }
 
         // Named listener reference — stored for removeListener calls
@@ -277,7 +357,56 @@ export function createStreamingBridge(
 
 
 
-            case "ToolStateChange":
+            case "ToolStateChange": {
+              if (action.toolName.toLowerCase() === "task" && action.partId) {
+                const previousTask = taskDetails.get(action.partId)
+                const inputDescription = taskDisplayValue(action.input?.description, "子任务")
+                const inputAgent = taskDisplayValue(action.input?.subagent_type, "子Agent")
+                const description = inputDescription ?? previousTask?.description
+                const agent = inputAgent ?? previousTask?.agent
+                if (description && agent) taskDetails.set(action.partId, { description, agent })
+                const childSessionId = stringValue(action.metadata?.sessionId)
+                if (childSessionId) {
+                  attachChild(action.partId, childSessionId)
+                  if (action.state === "completed" || action.state === "error") {
+                    const child = childStreams.get(childSessionId)
+                    if (child && !child.idle && !child.idleFallbackTimer && deps.serverUrl) {
+                      child.idleFallbackTimer = setTimeout(() => {
+                        child.idleFallbackTimer = null
+                        confirmSessionIdle(deps.serverUrl!, childSessionId)
+                          .then((idle) => {
+                            if (!idle || child.idle) return
+                            child.idle = true
+                            card?.setChildStatus(childSessionId, action.state === "error" ? "error" : "completed").catch(() => {})
+                            maybeComplete()
+                          })
+                          .catch((err) => logger.warn(`child idle confirmation failed: ${err}`))
+                      }, CHILD_IDLE_GRACE_MS)
+                      child.idleFallbackTimer.unref?.()
+                    }
+                  }
+                }
+                if (!description || !agent) break
+                ensureCard()
+                  .then(async () => {
+                    await card!.setTaskStatus({
+                      partId: action.partId!,
+                      description,
+                      agent,
+                      state: action.state as "pending" | "running" | "completed" | "error",
+                      ...(childSessionId ? { childSessionId } : {}),
+                    })
+                    if (childSessionId) {
+                      await card!.setChildStatus(
+                        childSessionId,
+                        action.state === "error" ? "error" : action.state === "completed" ? "completed" : "running",
+                      )
+                      maybeComplete()
+                    }
+                  })
+                  .catch((err) => logger.warn(`task status update failed: ${err}`))
+                break
+              }
               ensureCard()
                 .then(() => {
                   card!
@@ -298,6 +427,7 @@ export function createStreamingBridge(
                   logger.warn(`card start for tool failed: ${err}`)
                 })
               break
+            }
 
             case "SubtaskDiscovered": {
               ensureCard()
@@ -383,9 +513,8 @@ export function createStreamingBridge(
                 logger.debug(`Ignoring idle before current response started for session ${sessionId}`)
                 return
               }
-              settled = true
-              const responseText = getResponseText() || "（无回复）"
-              void complete(responseText)
+              parentIdle = true
+              maybeComplete()
               break
             }
 
@@ -543,6 +672,24 @@ function truncateResponseText(text: string): string {
   return text.slice(0, maxLength) + "\n\n…(内容过长，已截断)"
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+function taskDisplayValue(value: unknown, placeholder: string): string | undefined {
+  const text = stringValue(value)?.trim()
+  if (!text) return undefined
+  const normalized = text.toLowerCase()
+  if (
+    normalized === placeholder.toLowerCase()
+    || normalized === "agent"
+    || normalized === "subagent"
+    || normalized === "sub-agent"
+    || normalized === "assistant"
+  ) return undefined
+  return text
+}
+
 export function stripThinkingContent(text: string): string {
   let visible = text.replace(
     /<(thinking|think|analysis)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
@@ -575,6 +722,14 @@ async function isSessionBusy(serverUrl: string, sessionId: string, logger: Logge
     logger.warn(`Failed to check session status before prompt: ${err}`)
     return false
   }
+}
+
+async function confirmSessionIdle(serverUrl: string, sessionId: string): Promise<boolean> {
+  const response = await fetch(`${serverUrl}/session/status`)
+  if (!response.ok) return false
+  const statuses = await response.json() as Record<string, { type?: string }>
+  const status = statuses[sessionId]?.type
+  return status === undefined || status === "idle"
 }
 
 export function buildFinalResponseCard(text: string): Record<string, unknown> {

@@ -271,6 +271,193 @@ describe("AgentConsoleSession", () => {
     expect(content).toContain("✓ 已执行命令 bun run build")
   })
 
+  it("renders description@agent as a task navigation control and supports Back", async () => {
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    await session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "running",
+      childSessionId: "ses-child-1",
+    })
+
+    const progress = cardkitClient.updateElement.mock.calls
+      .find((call) => call[1] === "progress")?.[2] as string
+    expect(progress).toContain("正在执行子任务 Excel开发问答@问答助手")
+
+    const taskElements = cardkitClient.insertElements.mock.calls.at(-1)?.[1]
+    expect(JSON.stringify(taskElements)).toContain("Excel开发问答@问答助手")
+    expect(JSON.stringify(taskElements)).toContain("agent_console_view_child")
+    expect(JSON.stringify(taskElements)).toContain('"taskKey":"task-1"')
+
+    await session.markChildOutput("ses-child-1")
+    await session.viewChild("ses-child-1")
+    const childElements = cardkitClient.insertElements.mock.calls.at(-1)?.[1]
+    expect(JSON.stringify(childElements)).toContain("← 返回")
+    expect(JSON.stringify(childElements)).toContain("Excel开发问答@问答助手")
+    expect(cardkitClient.updateElement).not.toHaveBeenCalledWith(
+      "card_123", "answer", "正在分析 Excel 文件", expect.any(Number),
+    )
+    expect(cardkitClient.updateElement.mock.calls
+      .filter((call) => call[1] === "progress")
+      .at(-1)?.[2]).toContain("正在输出")
+
+    await session.viewParent()
+    const restoredElements = cardkitClient.insertElements.mock.calls.at(-1)?.[1]
+    expect(JSON.stringify(restoredElements)).toContain("Excel开发问答@问答助手")
+  })
+
+  it("renders child tool calls with the same dynamic timeline as the parent", async () => {
+    vi.useFakeTimers()
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    const task = session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "completed",
+      childSessionId: "ses-child-1",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await task
+    const switchView = session.viewChild("ses-child-1")
+    await vi.advanceTimersByTimeAsync(600)
+    await switchView
+
+    const running = session.setChildToolStatus("ses-child-1", {
+      partId: "child-tool-1",
+      name: "read",
+      state: "running",
+      title: "workbook.ts",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await running
+    let content = cardkitClient.updateElement.mock.calls.at(-1)?.[2] as string
+    expect(content).toContain("正在读取 workbook.ts · 已用时 0 秒")
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    content = cardkitClient.updateElement.mock.calls.at(-1)?.[2] as string
+    expect(content).toContain("正在读取 workbook.ts · 已用时 1 秒")
+
+    const completed = session.setChildToolStatus("ses-child-1", {
+      partId: "child-tool-1",
+      name: "read",
+      state: "completed",
+      title: "workbook.ts",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await completed
+    content = cardkitClient.updateElement.mock.calls.at(-1)?.[2] as string
+    expect(content).toContain("✓ 已读取 workbook.ts · 用时 1.3 秒")
+  })
+
+  it("removes a completed child navigation control after returning to the parent", async () => {
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    await session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "running",
+      childSessionId: "ses-child-1",
+    })
+    await session.markChildOutput("ses-child-1")
+    await session.viewChild("ses-child-1")
+    await session.setChildStatus("ses-child-1", "completed")
+    cardkitClient.insertElements.mockClear()
+    await session.viewParent()
+
+    expect(JSON.stringify(cardkitClient.insertElements.mock.calls)).not.toContain("agent_console_view_child")
+  })
+
+  it("shows a live output timer in the child view", async () => {
+    vi.useFakeTimers()
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    const task = session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "running",
+      childSessionId: "ses-child-1",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await task
+    const switchView = session.viewChild("ses-child-1")
+    await vi.advanceTimersByTimeAsync(600)
+    await switchView
+    const answer = session.markChildOutput("ses-child-1")
+    await vi.advanceTimersByTimeAsync(300)
+    await answer
+    const initialProgress = cardkitClient.updateElement.mock.calls
+      .filter((call) => call[1] === "progress")
+      .at(-1)?.[2] as string
+    expect(initialProgress).toContain("正在输出... · 已用时 0 秒")
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    const progressUpdates = cardkitClient.updateElement.mock.calls.filter((call) => call[1] === "progress")
+    expect(progressUpdates.at(-1)?.[2]).toContain("正在输出... · 已用时 1 秒")
+  })
+
+  it("hides the output timer while a child tool is active", async () => {
+    vi.useFakeTimers()
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    const task = session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "running",
+      childSessionId: "ses-child-1",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await task
+    const switchView = session.viewChild("ses-child-1")
+    await vi.advanceTimersByTimeAsync(600)
+    await switchView
+    const tool = session.setChildToolStatus("ses-child-1", {
+      partId: "nested-task",
+      name: "task",
+      state: "running",
+      title: "执行子子任务",
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    await tool
+    await session.markChildOutput("ses-child-1")
+    await vi.advanceTimersByTimeAsync(300)
+
+    const progress = cardkitClient.updateElement.mock.calls
+      .filter((call) => call[1] === "progress")
+      .at(-1)?.[2] as string
+    expect(progress).toContain("正在执行子任务")
+    expect(progress).not.toContain("正在输出")
+  })
+
+  it("keeps parent updates cached while viewing a child and restores them on Back", async () => {
+    const { session, cardkitClient } = createSession()
+    await session.start()
+    await session.setTaskStatus({
+      partId: "task-1",
+      description: "Excel开发问答",
+      agent: "问答助手",
+      state: "running",
+      childSessionId: "ses-child-1",
+    })
+    await session.viewChild("ses-child-1")
+    cardkitClient.updateElement.mockClear()
+
+    await session.setAnswerText("主 Session 最新回答")
+
+    expect(cardkitClient.updateElement).not.toHaveBeenCalledWith(
+      "card_123", "answer", "主 Session 最新回答", expect.any(Number),
+    )
+    await session.viewParent()
+    expect(cardkitClient.updateElement).toHaveBeenCalledWith(
+      "card_123", "answer", "主 Session 最新回答", expect.any(Number),
+    )
+  })
+
   it("matches a completed tool to the latest fallback running item", async () => {
     const { session, cardkitClient } = createSession()
     await session.start()

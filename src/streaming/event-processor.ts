@@ -27,6 +27,7 @@ export interface ToolStateChange {
   readonly output?: string
   readonly error?: string
   readonly title?: string
+  readonly metadata?: Record<string, unknown>
 }
 
 export interface SubtaskDiscovered {
@@ -89,7 +90,14 @@ interface MessagePartUpdatedEvent {
       text?: string
 
       tool?: string
-      state?: { status: string; input?: Record<string, unknown>; output?: string; error?: string; title?: string }
+      state?: {
+        status: string
+        input?: Record<string, unknown>
+        output?: string
+        error?: string
+        title?: string
+        metadata?: Record<string, unknown>
+      }
 
       prompt?: string
       description?: string
@@ -376,6 +384,7 @@ export class EventProcessor {
     const title = (state as Record<string, unknown>).title
     const input = (state as Record<string, unknown>).input
     const output = (state as Record<string, unknown>).output
+    const metadata = (state as Record<string, unknown>).metadata
     const partId = part.id
     const result: ToolStateChange = {
       type: "ToolStateChange",
@@ -387,6 +396,7 @@ export class EventProcessor {
       ...(typeof output === "string" ? { output } : {}),
       ...(typeof error === "string" ? { error } : {}),
       ...(typeof title === "string" ? { title } : {}),
+      ...(isObject(metadata) ? { metadata } : {}),
     }
     return result
   }

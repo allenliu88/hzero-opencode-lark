@@ -38,6 +38,14 @@ export interface AgentConsoleToolEvent {
   input?: Record<string, unknown>
 }
 
+export interface AgentConsoleTaskEvent {
+  partId: string
+  description: string
+  agent: string
+  state: AgentConsoleToolState
+  childSessionId?: string
+}
+
 export interface AgentConsoleCloseOptions {
   status?: "completed" | "error"
   reason?: string
@@ -74,6 +82,22 @@ interface AgentConsoleItem {
   interactionStartedAt?: number
   startedAt: number
   endedAt?: number
+  task?: {
+    description: string
+    agent: string
+    childSessionId?: string
+  }
+}
+
+interface ChildViewState {
+  sessionId: string
+  title: string
+  hasOutput: boolean
+  status: "running" | "completed" | "error"
+  items: AgentConsoleItem[]
+  analysisStartedAt: number
+  outputStartedAt?: number
+  outputEndedAt?: number
 }
 
 interface AgentConsoleModel {
@@ -87,6 +111,8 @@ interface AgentConsoleModel {
 const PROGRESS_ELEMENT_ID = "progress"
 const ANSWER_ELEMENT_ID = "answer"
 const INTERACTION_ELEMENT_ID = "interaction"
+const NAVIGATION_ELEMENT_ID = "session_navigation"
+const TASK_LINKS_ELEMENT_ID = "task_links"
 export const ANSWER_ELEMENT_MAX_BYTES = 18 * 1024
 const TIMELINE_VISIBLE_LIMIT = 5
 const UPDATE_INTERVAL_MS = 300
@@ -128,6 +154,11 @@ export class AgentConsoleSession {
   private interactionVisible = false
   private activeInteractionId: string | null = null
   private interactionMutation: Promise<void> = Promise.resolve()
+  private selectedChildSessionId: string | null = null
+  private readonly childViews = new Map<string, ChildViewState>()
+  private navigationVisible = false
+  private taskLinksVisible = false
+  private navigationSignature = ""
 
   constructor(options: AgentConsoleOptions) {
     this.cardkitClient = options.cardkitClient
@@ -139,6 +170,14 @@ export class AgentConsoleSession {
 
   get isActive(): boolean {
     return this.state !== null && !this.closed
+  }
+
+  get cardMessageId(): string | undefined {
+    return this.state?.messageId
+  }
+
+  get targetChatId(): string {
+    return this.chatId
   }
 
   async start(): Promise<void> {
@@ -248,6 +287,126 @@ export class AgentConsoleSession {
     })
     this.syncElapsedTimer()
     await this.updateProgress()
+  }
+
+  async setTaskStatus(event: AgentConsoleTaskEvent): Promise<void> {
+    if (!this.state || this.closed || this.closing) return
+    const now = Date.now()
+    const state = normalizeToolState(event.state)
+    const existing = this.items.find((item) => item.id === event.partId)
+    const task = {
+      description: event.description,
+      agent: event.agent,
+      ...(event.childSessionId ? { childSessionId: event.childSessionId } : {}),
+    }
+    if (existing) {
+      existing.status = state === "completed" ? "done" : state
+      existing.label = "执行子任务"
+      existing.detail = `${event.description}@${event.agent}`
+      existing.task = { ...existing.task, ...task }
+      if (state === "completed" || state === "error") existing.endedAt = now
+    } else {
+      this.items.push({
+        id: event.partId,
+        kind: "task",
+        status: state === "completed" ? "done" : state,
+        label: "执行子任务",
+        detail: `${event.description}@${event.agent}`,
+        startedAt: now,
+        ...(state === "completed" || state === "error" ? { endedAt: now } : {}),
+        task,
+      })
+    }
+    if (event.childSessionId && !this.childViews.has(event.childSessionId)) {
+      this.childViews.set(event.childSessionId, {
+        sessionId: event.childSessionId,
+        title: `${event.description}@${event.agent}`,
+        hasOutput: false,
+        status: "running",
+        items: [],
+        analysisStartedAt: now,
+      })
+    }
+    this.status = state === "error" ? "error" : "running"
+    this.syncElapsedTimer()
+    await this.updateProgress()
+    await this.refreshNavigationElements()
+  }
+
+  async markChildOutput(sessionId: string): Promise<void> {
+    const child = this.childViews.get(sessionId)
+    if (!child || this.closed || this.closing) return
+    child.hasOutput = true
+    if (!hasActiveItems(child.items)) {
+      child.outputStartedAt ??= Date.now()
+      child.outputEndedAt = undefined
+    }
+    this.syncElapsedTimer()
+    if (this.selectedChildSessionId === sessionId && !this.streamingPaused) {
+      await this.updateViewContent(PROGRESS_ELEMENT_ID, renderChildProgress(child))
+    }
+  }
+
+  async setChildStatus(sessionId: string, status: ChildViewState["status"]): Promise<void> {
+    const child = this.childViews.get(sessionId)
+    if (!child) return
+    child.status = status
+    if (status !== "running" && child.outputStartedAt) child.outputEndedAt ??= Date.now()
+    this.syncElapsedTimer()
+    if (this.selectedChildSessionId === sessionId) await this.updateSelectedChild(child)
+    else await this.refreshNavigationElements()
+  }
+
+  async setChildToolStatus(sessionId: string, event: AgentConsoleToolEvent): Promise<void> {
+    const child = this.childViews.get(sessionId)
+    if (!child || this.closing) return
+    const state = normalizeToolState(event.state)
+    const id = event.partId ?? `${event.name}:${event.title ?? ""}`
+    const description = describeToolEvent(event.name, event.title, event.input)
+    const existing = child.items.find((item) => item.id === id)
+    const now = Date.now()
+    if (existing) {
+      existing.status = state === "completed" ? "done" : state
+      existing.label = description.label
+      if (description.detail) existing.detail = description.detail
+      if (state === "completed" || state === "error") existing.endedAt = now
+    } else {
+      child.items.push({
+        id,
+        kind: description.kind,
+        status: state === "completed" ? "done" : state,
+        label: description.label,
+        detail: description.detail,
+        startedAt: now,
+        ...(state === "completed" || state === "error" ? { endedAt: now } : {}),
+      })
+    }
+    if (state === "pending" || state === "running") {
+      child.outputStartedAt = undefined
+      child.outputEndedAt = undefined
+    } else if (child.hasOutput && !hasActiveItems(child.items)) {
+      child.outputStartedAt ??= now
+    }
+    this.syncElapsedTimer()
+    if (this.selectedChildSessionId === sessionId) await this.updateSelectedChild(child)
+  }
+
+  async viewChild(sessionId: string): Promise<void> {
+    const child = this.childViews.get(sessionId)
+    if (!child || !this.state || this.closing) return
+    await this.awaitPendingUpdates()
+    this.selectedChildSessionId = sessionId
+    await this.refreshNavigationElements()
+    await this.updateSelectedChild(child)
+  }
+
+  async viewParent(): Promise<void> {
+    if (!this.state || this.closing) return
+    await this.awaitPendingUpdates()
+    this.selectedChildSessionId = null
+    await this.refreshNavigationElements()
+    await this.updateViewContent(PROGRESS_ELEMENT_ID, this.renderProgress())
+    await this.updateViewContent(ANSWER_ELEMENT_ID, this.answerText)
   }
 
   async setWaitingForQuestion(title: string, requestId: string): Promise<void> {
@@ -461,6 +620,7 @@ export class AgentConsoleSession {
     this.answerStarted ||= text.length > 0
     this.syncElapsedTimer()
     this.answerText = truncateUtf8(text, ANSWER_ELEMENT_MAX_BYTES)
+    if (this.selectedChildSessionId) return
     const elementId = this.items.length === 0 ? PROGRESS_ELEMENT_ID : ANSWER_ELEMENT_ID
     if (this.streamingPaused) return
     await this.enqueueUpdate(elementId, this.answerText)
@@ -574,10 +734,76 @@ export class AgentConsoleSession {
   private async updateProgress(): Promise<void> {
     await this.interactionMutation
     if (this.streamingPaused) return
+    if (this.selectedChildSessionId) return
     if (this.items.length > 0 && this.answerStarted) {
       await this.enqueueUpdate(ANSWER_ELEMENT_ID, this.answerText)
     }
     await this.enqueueUpdate(PROGRESS_ELEMENT_ID, this.renderProgress())
+  }
+
+  private async refreshNavigationElements(): Promise<void> {
+    await this.mutateInteraction(async () => {
+      if (!this.state || this.closing) return
+      const selected = this.selectedChildSessionId
+      const taskItems = this.items.filter((item) => {
+        const childSessionId = item.task?.childSessionId
+        if (!childSessionId || item.status === "done" || item.status === "error") return false
+        return this.childViews.get(childSessionId)?.status === "running"
+      })
+      const signature = selected
+        ? `child:${selected}`
+        : `parent:${taskItems.map((item) => item.id).join(",")}`
+      if (signature === this.navigationSignature) return
+      if (this.navigationVisible) {
+        this.state.sequence += 1
+        await this.cardkitClient.deleteElement(this.state.cardId, NAVIGATION_ELEMENT_ID, this.state.sequence)
+        this.navigationVisible = false
+      }
+      if (this.taskLinksVisible) {
+        this.state.sequence += 1
+        await this.cardkitClient.deleteElement(this.state.cardId, TASK_LINKS_ELEMENT_ID, this.state.sequence)
+        this.taskLinksVisible = false
+      }
+      if (selected) {
+        const child = this.childViews.get(selected)
+        if (!child) return
+        this.state.sequence += 1
+        await this.cardkitClient.insertElements(this.state.cardId, [buildChildNavigation(child)], this.state.sequence)
+        this.navigationVisible = true
+      } else if (taskItems.length > 0) {
+        this.state.sequence += 1
+        await this.cardkitClient.insertElements(
+          this.state.cardId,
+          [buildTaskLinks(taskItems)],
+          this.state.sequence,
+          PROGRESS_ELEMENT_ID,
+        )
+        this.taskLinksVisible = true
+      }
+      this.navigationSignature = signature
+    })
+  }
+
+  private async updateSelectedChild(child: ChildViewState): Promise<void> {
+    await this.updateViewContent(PROGRESS_ELEMENT_ID, renderChildProgress(child))
+    await this.updateViewContent(ANSWER_ELEMENT_ID, "")
+  }
+
+  private async awaitPendingUpdates(): Promise<void> {
+    try {
+      await this.updatePromise
+    } catch {
+      // A failed stale-view update must not block navigation.
+    }
+    await this.interactionMutation
+  }
+
+  private async updateViewContent(elementId: string, content: string): Promise<void> {
+    if (this.closed) {
+      await this.sendContent(elementId, content)
+      return
+    }
+    await this.enqueueUpdate(elementId, content)
   }
 
   private async showInteraction(elements: CardElement[]): Promise<void> {
@@ -608,15 +834,8 @@ export class AgentConsoleSession {
   }
 
   private async mutateInteraction(operation: () => Promise<void>): Promise<void> {
-    const mutation = this.interactionMutation
-      .catch(() => {})
-      .then(async () => {
-        try {
-          await this.updatePromise
-        } catch {}
-        await operation()
-      })
-    this.interactionMutation = mutation
+    const mutation = this.interactionMutation.then(operation)
+    this.interactionMutation = mutation.catch(() => {})
     await mutation
   }
 
@@ -658,16 +877,19 @@ export class AgentConsoleSession {
 
   private async sendContent(elementId: string, content: string): Promise<void> {
     if (!this.state) return
-    this.lastUpdateStartedAt = Date.now()
-    this.state.sequence += 1
-    await this.cardkitClient.updateElement(
-      this.state.cardId,
-      elementId,
-      content,
-      this.state.sequence,
-    )
-    this.lastSentContent.set(elementId, content)
-    this.lastVisibleUpdateAt = Date.now()
+    await this.mutateInteraction(async () => {
+      if (!this.state) return
+      this.lastUpdateStartedAt = Date.now()
+      this.state.sequence += 1
+      await this.cardkitClient.updateElement(
+        this.state.cardId,
+        elementId,
+        content,
+        this.state.sequence,
+      )
+      this.lastSentContent.set(elementId, content)
+      this.lastVisibleUpdateAt = Date.now()
+    })
   }
 
   private renderProgress(): string {
@@ -703,23 +925,25 @@ export class AgentConsoleSession {
     if (!this.state || this.closed || this.closing) return
     if (!["starting", "running", "waiting_question", "waiting_permission"].includes(this.status)) return
     if (Date.now() - this.lastVisibleUpdateAt < HEARTBEAT_SKIP_IF_UPDATED_WITHIN_MS) return
-    try {
-      await this.updatePromise
-    } catch {
-      // Renewal may continue after a failed content update.
-    }
-    if (!this.state || this.closed || this.closing) return
-    this.state.sequence += 1
-    await this.cardkitClient.renewStreaming(
-      this.state.cardId,
-      this.state.sequence,
-      STREAMING_CONFIG,
-    )
+    await this.mutateInteraction(async () => {
+      if (!this.state || this.closed || this.closing) return
+      this.state.sequence += 1
+      await this.cardkitClient.renewStreaming(
+        this.state.cardId,
+        this.state.sequence,
+        STREAMING_CONFIG,
+      )
+    })
   }
 
   private syncElapsedTimer(): void {
-    const hasTimedItem = this.items.some((item) => item.status === "running" || item.status === "waiting")
-    const isAnalyzing = this.items.length === 0 && !this.answerStarted && this.status === "starting"
+    const selectedChild = this.selectedChildSessionId
+      ? this.childViews.get(this.selectedChildSessionId)
+      : undefined
+    const visibleItems = selectedChild?.items ?? this.items
+    const hasTimedItem = hasActiveItems(visibleItems)
+      || Boolean(selectedChild?.status === "running" && selectedChild.outputStartedAt)
+    const isAnalyzing = !selectedChild && this.items.length === 0 && !this.answerStarted && this.status === "starting"
     if (!hasTimedItem && !isAnalyzing) {
       this.stopElapsedTimer()
       return
@@ -729,19 +953,30 @@ export class AgentConsoleSession {
   }
 
   private scheduleElapsedTick(): void {
-    const activeItems = this.items.filter((item) => item.status === "running" || item.status === "waiting")
-    const isAnalyzing = this.items.length === 0 && !this.answerStarted && this.status === "starting"
-    if ((activeItems.length === 0 && !isAnalyzing) || this.closed || this.closing) {
+    const selectedChild = this.selectedChildSessionId
+      ? this.childViews.get(this.selectedChildSessionId)
+      : undefined
+    const visibleItems = selectedChild?.items ?? this.items
+    const activeItems = visibleItems.filter((item) => item.status === "running" || item.status === "waiting")
+    const isOutputting = Boolean(selectedChild?.status === "running" && selectedChild.outputStartedAt)
+    const isAnalyzing = !selectedChild && this.items.length === 0 && !this.answerStarted && this.status === "starting"
+    if ((activeItems.length === 0 && !isAnalyzing && !isOutputting) || this.closing) {
       this.stopElapsedTimer()
       return
     }
     const elapsedValues = activeItems.map((item) => Date.now() - item.startedAt)
+    if (isOutputting) elapsedValues.push(Date.now() - selectedChild!.outputStartedAt!)
     if (isAnalyzing) elapsedValues.push(Date.now() - this.analysisStartedAt)
     const shortestElapsed = Math.min(...elapsedValues)
     this.elapsedTimer = setTimeout(() => {
       this.elapsedTimer = null
-      if (this.closed || this.closing) return
-      this.updateProgress().catch(() => {})
+      if (this.closing) return
+      if (this.selectedChildSessionId) {
+        const child = this.childViews.get(this.selectedChildSessionId)
+        if (child) this.updateSelectedChild(child).catch(() => {})
+      } else {
+        this.updateProgress().catch(() => {})
+      }
       this.scheduleElapsedTick()
     }, elapsedRefreshInterval(shortestElapsed))
     this.elapsedTimer.unref?.()
@@ -829,6 +1064,85 @@ function renderItem(item: AgentConsoleItem): string {
     case "pending":
       return `○ 正在${item.label}${detail}`
   }
+}
+
+function buildTaskLinks(items: AgentConsoleItem[]): CardElement {
+  return {
+    tag: "column_set",
+    element_id: TASK_LINKS_ELEMENT_ID,
+    flex_mode: "flow",
+    horizontal_spacing: "8px",
+    columns: items.slice(-TIMELINE_VISIBLE_LIMIT).map((item) => ({
+      tag: "column",
+      width: "auto",
+      elements: [{
+        tag: "button",
+        type: "default",
+        size: "small",
+        text: { tag: "plain_text", content: `${item.task!.description}@${item.task!.agent}` },
+        behaviors: [{
+          type: "callback",
+          value: {
+            action: "agent_console_view_child",
+            taskKey: item.id,
+          },
+        }],
+      }],
+    })),
+  }
+}
+
+function buildChildNavigation(child: ChildViewState): CardElement {
+  return {
+    tag: "column_set",
+    element_id: NAVIGATION_ELEMENT_ID,
+    flex_mode: "flow",
+    horizontal_spacing: "8px",
+    columns: [
+      {
+        tag: "column",
+        width: "auto",
+        elements: [{
+          tag: "button",
+          type: "default",
+          size: "small",
+          text: { tag: "plain_text", content: "← 返回" },
+          behaviors: [{ type: "callback", value: { action: "agent_console_back" } }],
+        }],
+      },
+      {
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        vertical_align: "center",
+        elements: [{ tag: "markdown", content: `**${escapeMarkdown(child.title)}**` }],
+      },
+    ],
+  }
+}
+
+function renderChildProgress(child: ChildViewState): string {
+  const timeline = child.items.length === 0 && child.outputStartedAt
+    ? ""
+    : renderAgentConsole({
+    status: child.status === "running" ? "running" : child.status === "error" ? "error" : "completed",
+    items: child.items.slice(-TIMELINE_VISIBLE_LIMIT),
+    foldedCount: Math.max(0, child.items.length - TIMELINE_VISIBLE_LIMIT),
+    analysisStartedAt: child.analysisStartedAt,
+    ...(child.status === "error" ? { errorReason: "子任务执行失败" } : {}),
+    })
+  if (!child.outputStartedAt || hasActiveItems(child.items) || !child.hasOutput) return timeline
+  const elapsed = (child.outputEndedAt ?? Date.now()) - child.outputStartedAt
+  const output = child.status === "running"
+    ? `正在输出... · 已用时 ${formatElapsed(elapsed, false)}`
+    : child.status === "completed"
+      ? `✓ 已输出 · 用时 ${formatElapsed(elapsed, true)}`
+      : `! 输出失败 · 运行 ${formatElapsed(elapsed, true)}`
+  return timeline ? `${timeline}\n${output}` : output
+}
+
+function hasActiveItems(items: AgentConsoleItem[]): boolean {
+  return items.some((item) => item.status === "pending" || item.status === "running" || item.status === "waiting")
 }
 
 function delay(ms: number): Promise<void> {
