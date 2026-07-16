@@ -21,6 +21,7 @@
 - **Graceful recovery** — Reconnects to the opencode server with exponential backoff (up to 10 attempts) on startup.
 - **Extensible channel layer** — `ChannelPlugin` interface lets you add Slack, Discord, or any other platform without touching core logic.
 - **File and image support** — Handles image and file messages from Feishu (not just text). Downloads attachments to `${OPENCODE_CWD}/.opencode-lark/attachments/` and forwards the local path to opencode for analysis. 50 MB size limit, streaming download, filename sanitization included.
+- **Remote file browser** — Use `/files` or `/files src` to browse the current OpenCode session's server-side workspace and preview text files in a paginated interactive card without invoking a model.
 
 ---
 
@@ -55,6 +56,12 @@ opencode TUI
 | `audio` / `video` / `sticker` | ❌ | Logged and skipped |
 
 Downloaded files are saved to `${OPENCODE_CWD}/.opencode-lark/attachments/` (falls back to the system temp directory if that path isn't writable).
+
+### Remote File Browser
+
+Send `/files` to browse the root directory of the OpenCode session currently bound to the Feishu chat or thread. Send `/files src` to start from a project-relative directory. Directory and file navigation updates the same Card JSON 2.0 card; only the user who opened the card can operate it. Directory rows use `📁`/`📄` icons and a full-width clickable name. Parent, root, refresh, and pagination actions share one non-wrapping row.
+
+The browser is read-only, previews text files up to 1 MiB in 60-line pages, and blocks common secret files such as `.env`, private keys, and certificates. Files are read through the OpenCode Server file API, so they come from the OpenCode server host rather than the `opencode-lark` host. Interactive navigation requires the `card.action.trigger` callback subscription. Each card view uses an expiring token and idempotent action IDs; OpenCode requests have bounded timeouts and Feishu card updates use limited retries.
 
 ---
 

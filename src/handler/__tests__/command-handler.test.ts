@@ -260,6 +260,48 @@ describe("createCommandHandler", () => {
     })
   })
 
+  describe("/files", () => {
+    it("opens the browser for the existing session without creating one", async () => {
+      const fileBrowserRegistry = { open: vi.fn().mockResolvedValue(undefined) }
+      const handler = createCommandHandler({
+        serverUrl: "http://test:4096",
+        sessionManager: mockSessionManager,
+        feishuClient: mockFeishuClient,
+        logger: mockLogger,
+        fileBrowserRegistry: fileBrowserRegistry as any,
+      })
+
+      expect(await handler("chat-1", "chat-1", "msg-1", "/files src", "user-1")).toBe(true)
+      expect(fileBrowserRegistry.open).toHaveBeenCalledWith({
+        chatId: "chat-1",
+        replyToMessageId: "msg-1",
+        operatorOpenId: "user-1",
+        relativePath: "src",
+        sessionId: "ses-123",
+      })
+      expect(mockSessionManager.getOrCreate).not.toHaveBeenCalled()
+    })
+
+    it("prompts for a session when none is bound", async () => {
+      const sm = createMockSessionManager(null)
+      const fileBrowserRegistry = { open: vi.fn() }
+      const handler = createCommandHandler({
+        serverUrl: "http://test:4096",
+        sessionManager: sm,
+        feishuClient: mockFeishuClient,
+        logger: mockLogger,
+        fileBrowserRegistry: fileBrowserRegistry as any,
+      })
+
+      expect(await handler("chat-1", "chat-1", "msg-1", "/files", "user-1")).toBe(true)
+      expect(fileBrowserRegistry.open).not.toHaveBeenCalled()
+      expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
+        msg_type: "text",
+        content: expect.stringContaining("/sessions"),
+      })
+    })
+  })
+
 
   describe("/help and /", () => {
     it("builds a command selection card without interactive buttons", () => {

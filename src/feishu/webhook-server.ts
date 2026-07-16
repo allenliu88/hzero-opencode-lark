@@ -16,7 +16,9 @@ interface WebhookServerOptions {
   port: number
   verificationToken: string
   onMessage: (event: FeishuMessageEvent) => Promise<void>
-  onCardAction: (action: FeishuCardAction) => Promise<void>
+  onCardAction: (
+    action: FeishuCardAction,
+  ) => Promise<void> | Record<string, unknown> | void
   dedup: MessageDedup
 }
 
@@ -122,11 +124,20 @@ export async function createFeishuGateway(
       operator: body["operator"] as { open_id: string },
     }
 
-    res.status(200).json(buildInteractiveCallbackResponse(action))
-
-    onCardAction(action).catch((err) => {
+    try {
+      const result = onCardAction(action)
+      if (isPromise(result)) {
+        res.status(200).json(buildInteractiveCallbackResponse(action))
+        void result.catch((err) => {
+          logger.error("Error processing card action:", err)
+        })
+      } else {
+        res.status(200).json(result ?? buildInteractiveCallbackResponse(action))
+      }
+    } catch (err) {
       logger.error("Error processing card action:", err)
-    })
+      res.status(200).json({})
+    }
   })
 
   // ── Health check ──
@@ -146,4 +157,8 @@ export async function createFeishuGateway(
     port,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   }
+}
+
+function isPromise(value: unknown): value is Promise<void> {
+  return Boolean(value && typeof value === "object" && "then" in value)
 }

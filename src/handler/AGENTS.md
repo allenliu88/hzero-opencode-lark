@@ -14,9 +14,11 @@ Core inbound pipeline. Receives normalized messages from `FeishuPlugin`, then:
 6. Kicks off `StreamingBridge` to listen for the response
 7. Calls `sendDetectedFiles` via `outbound-media.ts` once the session goes idle
 ### `command-handler.ts`
-Handles slash commands typed in Feishu: `/new`, `/sessions`, `/connect`, `/compact`, `/share`, `/abort`, `/help`.
+Handles slash commands typed in Feishu: `/new`, `/sessions`, `/connect`, `/files`, `/compact`, `/share`, `/abort`, `/help`.
 
 Key detail: the currently connected session is pinned at the top of the `/sessions` list regardless of API ordering. Sessions are displayed as interactive cards with clickable buttons to connect.
+
+`/files` is read-only and uses `SessionManager.getExisting()` so browsing never creates a new OpenCode session. It delegates remote file access and card navigation to `src/file-browser/`.
 
 ### `outbound-media.ts`
 Detects file paths in agent response text using regex, then uploads matching files back to Feishu as images or attachments.

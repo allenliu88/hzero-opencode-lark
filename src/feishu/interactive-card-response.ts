@@ -61,6 +61,12 @@ export function buildInteractiveCallbackResponse(
     }
   }
 
+  if (actionType?.startsWith("file_browser_")) {
+    return {
+      toast: { type: "info", content: "已收到浏览请求" },
+    }
+  }
+
   return {}
 }
 
@@ -81,6 +87,7 @@ export function buildCommandSelectedCard(command: string): Record<string, unknow
 function commandDisplayName(command: string): string {
   if (command === "/new") return "新建会话"
   if (command === "/sessions") return "连接会话"
+  if (command === "/files") return "浏览文件"
   if (command === "/abort") return "中止任务"
   if (command === "/test-loading") return "Loading 测试"
   if (command === "/test-loading-v2") return "Loading 2.0"

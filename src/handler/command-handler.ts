@@ -9,6 +9,7 @@
 import type { SessionManager } from "../session/session-manager.js"
 import type { FeishuApiClient } from "../feishu/api-client.js"
 import type { Logger } from "../utils/logger.js"
+import type { FileBrowserRegistry } from "../file-browser/file-browser-registry.js"
 
 // ── Dependency injection interface ──
 
@@ -17,6 +18,7 @@ export interface CommandHandlerDeps {
   sessionManager: SessionManager
   feishuClient: FeishuApiClient
   logger: Logger
+  fileBrowserRegistry?: FileBrowserRegistry
 }
 
 // ── Types ──
@@ -26,6 +28,7 @@ export type CommandHandler = (
   chatId: string,
   messageId: string,
   commandText: string,
+  senderOpenId?: string,
 ) => Promise<boolean>
 
 interface Session {
@@ -375,6 +378,35 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     })
   }
 
+  async function handleFiles(
+    feishuKey: string,
+    chatId: string,
+    messageId: string,
+    senderOpenId: string | undefined,
+    relativePath: string | undefined,
+  ): Promise<void> {
+    if (!deps.fileBrowserRegistry) {
+      await replyText(chatId, messageId, "当前版本未启用远程文件浏览。")
+      return
+    }
+    const sessionId = await sessionManager.getExisting(feishuKey)
+    if (!sessionId) {
+      await replyText(chatId, messageId, "当前话题尚未连接 OpenCode 会话，请先使用 /sessions 选择会话。")
+      return
+    }
+    if (!senderOpenId) {
+      await replyText(chatId, messageId, "无法确认操作用户，不能打开文件浏览器。")
+      return
+    }
+    await deps.fileBrowserRegistry.open({
+      chatId,
+      replyToMessageId: messageId,
+      operatorOpenId: senderOpenId,
+      relativePath,
+      sessionId,
+    })
+  }
+
   async function handleTestLoading(messageId: string): Promise<void> {
     const card = buildLoadingTestCard()
     await feishuClient.replyMessage(messageId, {
@@ -396,6 +428,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     chatId: string,
     messageId: string,
     commandText: string,
+    senderOpenId?: string,
   ): Promise<boolean> {
     const trimmed = commandText.trim()
     const parts = trimmed.split(/\s+/)
@@ -417,6 +450,10 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
 
         case "/sessions":
           await handleSessions(feishuKey, chatId, messageId)
+          return true
+
+        case "/files":
+          await handleFiles(feishuKey, chatId, messageId, senderOpenId, parts.slice(1).join(" ") || undefined)
           return true
 
         case "/connect": {

@@ -37,7 +37,9 @@ export interface FeishuPluginDeps {
   cardkitClient: CardKitClient
   logger: Logger
   onMessage?: (event: FeishuMessageEvent) => Promise<void>
-  onCardAction?: (action: FeishuCardAction) => Promise<void>
+  onCardAction?: (
+    action: FeishuCardAction,
+  ) => Promise<void> | Record<string, unknown> | void
 }
 
 // ── Plugin ──

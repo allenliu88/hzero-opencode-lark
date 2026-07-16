@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Features
+
+- Added a read-only `/files` remote workspace browser with Card JSON 2.0 directory rows, `📁`/`📄` icons, full session IDs, a single-line navigation area, lazy directory navigation, 60-line text pagination, per-user authorization, sensitive-file filtering, view-token/action-ID callback safety, request timeouts, and limited card-update retries.
+
 ## 0.1.21 (2026-03-04)
 
 ### Improvements

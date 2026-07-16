@@ -14,7 +14,9 @@ interface WSClientOptions {
   appId: string
   appSecret: string
   onMessage: (event: FeishuMessageEvent) => Promise<void>
-  onCardAction?: (action: FeishuCardAction) => Promise<void>
+  onCardAction?: (
+    action: FeishuCardAction,
+  ) => Promise<void> | Record<string, unknown> | void
 }
 
 export function createFeishuWSGateway(options: WSClientOptions) {
@@ -79,14 +81,16 @@ export function createFeishuWSGateway(options: WSClientOptions) {
             open_message_id: action.open_message_id,
             operator: action.operator.open_id,
           })
-          // Fire and forget — do NOT await.
-          // The opencode POST may take >3s and Feishu will timeout the callback.
-          void onCardAction(action).catch((err) => {
-            logger.error("Error in card action handler:", err)
-          })
-          // Return toast + updated card to give instant feedback and disable buttons.
-          // WSClient sends this back to Feishu as the callback response.
-          return buildInteractiveCallbackResponse(action)
+          // File-browser actions synchronously validate and enqueue so the callback
+          // can return an accurate toast. Long-running handlers remain fire-and-forget.
+          const result = onCardAction(action)
+          if (isPromise(result)) {
+            void result.catch((err) => {
+              logger.error("Error in card action handler:", err)
+            })
+            return buildInteractiveCallbackResponse(action)
+          }
+          return result ?? buildInteractiveCallbackResponse(action)
         } catch (err) {
           logger.error("Error handling card action:", err)
           // Return empty object even on error to avoid Feishu error 200340.
@@ -109,4 +113,8 @@ export function createFeishuWSGateway(options: WSClientOptions) {
       logger.info("Feishu WebSocket client started (long-polling Feishu servers)")
     },
   }
+}
+
+function isPromise(value: unknown): value is Promise<void> {
+  return Boolean(value && typeof value === "object" && "then" in value)
 }

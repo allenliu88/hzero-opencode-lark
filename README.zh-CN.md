@@ -35,6 +35,7 @@ OPENCODE_SERVER_URL=http://0.0.0.0:54096 bun run start ## 生产模式
 - **优雅重连** — 启动时指数退避重连 opencode server，最多重试 10 次，无需手动等待 server 就绪。
 - **可扩展渠道层** — `ChannelPlugin` 接口设计，可扩展接入 Slack、Discord 等其他平台，无需修改核心逻辑。
 - **文件与图片支持** — 支持飞书图片和文件消息（不限于文字）。附件下载保存至 `${OPENCODE_CWD}/.opencode-lark/attachments/`，并将本地路径传给 opencode 供其读取分析。支持流式下载，50 MB 大小限制，文件名安全处理。
+- **远程文件浏览器** — 使用 `/files` 或 `/files src` 浏览当前 OpenCode 会话所在服务器的项目目录，并在分页交互卡片中预览文本文件，无需调用模型。
 
 ---
 
@@ -69,6 +70,12 @@ opencode TUI
 | `audio` / `video` / `sticker` | ❌ | 记录日志后跳过，不处理 |
 
 下载的文件保存在 `${OPENCODE_CWD}/.opencode-lark/attachments/`（若该路径不可写则回退至系统临时目录）。
+
+### 远程文件浏览器
+
+发送 `/files` 可浏览当前飞书会话或话题所绑定 OpenCode session 的项目根目录；发送 `/files src` 可从项目内指定目录开始。目录导航和文件分页都在同一张 Card JSON 2.0 卡片中更新，默认只有创建卡片的用户可以操作。目录项使用 `📁`、`📄` 图标和全宽可点击名称；上一级、根目录、刷新和分页操作固定在同一个不换行操作区。
+
+浏览器为只读模式，以每页最多 60 行预览不超过 1 MiB 的文本文件，并默认拦截 `.env`、私钥和证书等常见敏感文件。文件通过 OpenCode Server 文件 API 读取，因此来自 OpenCode 服务器主机，而不是 `opencode-lark` 所在主机。交互导航需要订阅 `card.action.trigger` 回调。每版卡片使用短期视图令牌和幂等动作 ID；OpenCode 请求有明确超时，飞书卡片更新使用有限重试。
 
 ---
 

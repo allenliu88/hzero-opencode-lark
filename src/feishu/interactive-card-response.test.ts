@@ -45,6 +45,22 @@ describe("interactive-card-response", () => {
     expect(response.card).toBeUndefined()
   })
 
+  it("acknowledges file browser actions without replacing the card", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: {
+        tag: "button",
+        value: { action: "file_browser_refresh" },
+      },
+      open_message_id: "msg-files",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response).toEqual({
+      toast: { type: "info", content: "已收到浏览请求" },
+    })
+  })
+
   it("shows multiple form selections in the callback toast", () => {
     const response = buildInteractiveCallbackResponse({
       action: {

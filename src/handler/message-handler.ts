@@ -502,7 +502,13 @@ export function createMessageHandler(
 
     // ── 4b. Check for slash command ──
     if (userText.startsWith("/") && deps.commandHandler) {
-      const handled = await deps.commandHandler(feishuKey, event.chat_id, event.message_id, userText.trim())
+      const handled = await deps.commandHandler(
+        feishuKey,
+        event.chat_id,
+        event.message_id,
+        userText.trim(),
+        event.sender.sender_id.open_id,
+      )
       if (handled) return
     }
 

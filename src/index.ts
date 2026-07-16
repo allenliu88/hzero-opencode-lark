@@ -49,6 +49,8 @@ import { CronService } from "./cron/cron-service.js"
 import { HeartbeatService } from "./cron/heartbeat.js"
 import { loadEnvFile } from "./utils/env-loader.js"
 import { needsSetup, runSetupWizard, pickConfig } from "./cli/setup-wizard.js"
+import { createRemoteFileClient } from "./file-browser/remote-file-client.js"
+import { FileBrowserRegistry } from "./file-browser/file-browser-registry.js"
 
 const logger = createLogger("opencode-lark")
 
@@ -181,6 +183,12 @@ async function main(): Promise<void> {
   const embeddedInteractionRegistry = createEmbeddedInteractionRegistry()
   const activeStreamingSessions = new Set<string>()
   const agentConsoleRegistry = new AgentConsoleRegistry()
+  const remoteFileClient = createRemoteFileClient(client)
+  const fileBrowserRegistry = new FileBrowserRegistry(
+    remoteFileClient,
+    feishuClient,
+    logger,
+  )
 
   const eventProcessor = new EventProcessor({ ownedSessions, logger })
 
@@ -222,6 +230,7 @@ async function main(): Promise<void> {
     sessionManager,
     feishuClient,
     logger,
+    fileBrowserRegistry,
   })
 
   const { handleMessage, dispose: disposeDebouncer } = createMessageHandler({
@@ -270,22 +279,29 @@ async function main(): Promise<void> {
   interactivePoller.start()
   const handledCommandMessages = new Set<string>()
 
-  const handleCardAction = async (action: FeishuCardAction) => {
+  const handleCardAction = (
+    action: FeishuCardAction,
+  ): Promise<void> | Record<string, unknown> | void => {
     const actionType = action.action?.value?.action
     if (actionType === "view_subagent") {
       return subAgentCardHandler(action)
     }
     if (actionType === "agent_console_view_child" || actionType === "agent_console_back") {
-      const handled = await agentConsoleRegistry.handle(action)
-      if (!handled) logger.warn(`Ignored stale or invalid Agent Console action for ${action.open_message_id}`)
-      return
+      return agentConsoleRegistry.handle(action).then((handled) => {
+        if (!handled) logger.warn(`Ignored stale or invalid Agent Console action for ${action.open_message_id}`)
+      })
+    }
+    if (actionType?.startsWith("file_browser_")) {
+      const result = fileBrowserRegistry.enqueue(action)
+      if (!result.handled) logger.warn(`Ignored invalid file browser action for ${action.open_message_id}`)
+      return result.response ?? {}
     }
     if (actionType === "question_answer" || actionType === "permission_reply") {
       return interactiveHandler(action)
     }
     if (actionType === "command_execute") {
       const cmd = action.action?.value?.command
-      if (cmd) {
+      if (cmd) return (async () => {
         const chatId = action.open_chat_id
         const messageId = action.open_message_id
         if (handledCommandMessages.has(messageId)) {
@@ -302,8 +318,8 @@ async function main(): Promise<void> {
           logger.warn(`Failed to lock command menu ${messageId}: ${err}`)
         }
         // For card callbacks, use chatId as feishuKey (best-effort for p2p)
-        await commandHandler(chatId, chatId, messageId, cmd)
-      }
+        await commandHandler(chatId, chatId, messageId, cmd, action.operator.open_id)
+      })()
       return
     }
     logger.warn(`Unknown card action type: ${actionType}`)
@@ -443,6 +459,7 @@ async function main(): Promise<void> {
       subAgentTracker.close()
       interactiveCardRegistry.close()
       agentConsoleRegistry.close()
+      fileBrowserRegistry.close()
       seenInteractiveIds.close()
       dedup.close()
       db.close()
