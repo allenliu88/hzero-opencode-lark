@@ -146,16 +146,6 @@ function buildHelpCard(): Record<string, unknown> {
             type: "danger",
             value: { action: "command_execute", command: "/abort" },
           },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "🧪 Loading 测试" },
-            value: { action: "command_execute", command: "/test-loading" },
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "🧪 Loading 2.0" },
-            value: { action: "command_execute", command: "/test-loading-v2" },
-          },
         ],
       },
     ],

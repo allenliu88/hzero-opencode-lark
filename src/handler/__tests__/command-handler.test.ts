@@ -334,6 +334,8 @@ describe("createCommandHandler", () => {
       expect(content).toHaveProperty("header")
       expect(content).toHaveProperty("elements")
       expect(content.header?.title?.content).toContain("命令菜单")
+      expect(JSON.stringify(content)).not.toContain("Loading")
+      expect(JSON.stringify(content)).not.toContain("test-loading")
     })
 
     it("/ alone sends interactive card", async () => {
