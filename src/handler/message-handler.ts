@@ -7,6 +7,7 @@
  */
 
 import type { SessionManager } from "../session/session-manager.js"
+import type { SessionMapping } from "../types.js"
 import type { MessageDedup } from "../feishu/message-dedup.js"
 import type { EventProcessor } from "../streaming/event-processor.js"
 import { FileTooLargeError, type FeishuApiClient } from "../feishu/api-client.js"
@@ -246,6 +247,18 @@ function cleanStrippedMentionSpacing(text: string): string {
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
+}
+
+function buildOpencodeMessageBody(
+  parts: Array<{ type: string; text: string }>,
+  mapping: SessionMapping | null,
+): string {
+  return JSON.stringify({
+    parts,
+    ...(mapping?.agent ? { agent: mapping.agent } : {}),
+    ...(mapping?.provider_id ? { providerID: mapping.provider_id } : {}),
+    ...(mapping?.model_id ? { modelID: mapping.model_id } : {}),
+  })
 }
 
 function resolveMentionPlaceholders(
@@ -652,7 +665,8 @@ export function createMessageHandler(
 
     // ── 8. Build the POST-to-opencode function ──
     let currentSessionId = sessionId
-    const postBody = JSON.stringify({ parts })
+    const plainPostBody = JSON.stringify({ parts })
+    const postBody = buildOpencodeMessageBody(parts, sessionManager.getSession(feishuKey))
 
     async function postToOpencode(): Promise<string> {
       const url = `${serverUrl}/session/${currentSessionId}/message`
@@ -661,6 +675,16 @@ export function createMessageHandler(
         headers: { "Content-Type": "application/json" },
         body: postBody,
       })
+      if ((resp.status === 400 || resp.status === 422) && postBody !== plainPostBody) {
+        logger.warn(`Prompt HTTP ${resp.status} with context fields; retrying without agent/model overrides`)
+        const retry = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: plainPostBody,
+        })
+        if (!retry.ok) throw new Error(`Prompt HTTP error: ${retry.status}`)
+        return await retry.text()
+      }
       if (resp.status === 404) {
         throw new SessionGoneError(currentSessionId, 404)
       }
@@ -728,6 +752,7 @@ export function createMessageHandler(
             event.message_id,
             reactionId,
             userText,
+            feishuKey,
           )
         } catch (err) {
           // Always clean up on error
@@ -934,7 +959,8 @@ export function createMessageHandler(
 
     // Build POST function
     let currentSessionId = sessionId
-    const postBody = JSON.stringify({ parts })
+    const plainPostBody = JSON.stringify({ parts })
+    const postBody = buildOpencodeMessageBody(parts, sessionManager.getSession(feishuKey))
 
     async function postToOpencode(): Promise<string> {
       const url = `${serverUrl}/session/${currentSessionId}/message`
@@ -943,6 +969,16 @@ export function createMessageHandler(
         headers: { "Content-Type": "application/json" },
         body: postBody,
       })
+      if ((resp.status === 400 || resp.status === 422) && postBody !== plainPostBody) {
+        logger.warn(`Prompt HTTP ${resp.status} with context fields; retrying without agent/model overrides`)
+        const retry = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: plainPostBody,
+        })
+        if (!retry.ok) throw new Error(`Prompt HTTP error: ${retry.status}`)
+        return await retry.text()
+      }
       if (resp.status === 404) {
         throw new SessionGoneError(currentSessionId, 404)
       }
@@ -1012,6 +1048,7 @@ export function createMessageHandler(
             reactionMsgId,
             reactionId,
             mergedText,
+            feishuKey,
           )
         } catch (err) {
           if (ownershipListener) removeListener(eventListeners, sid, ownershipListener)

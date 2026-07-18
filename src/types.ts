@@ -34,6 +34,8 @@ export interface FeishuCardAction {
     value: Record<string, string>
     form_value?: Record<string, unknown>
     name?: string
+    option?: string
+    options?: string[]
   }
   open_message_id: string
   open_chat_id: string
@@ -60,6 +62,13 @@ export interface SessionMapping {
   feishu_key: string
   session_id: string
   agent: string
+  project_id?: string | null
+  directory?: string | null
+  provider_id?: string | null
+  model_id?: string | null
+  session_title?: string | null
+  project_name?: string | null
+  branch_name?: string | null
   created_at: number
   last_active: number
   is_bound?: number

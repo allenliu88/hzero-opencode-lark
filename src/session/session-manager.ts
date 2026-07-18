@@ -16,10 +16,23 @@ export interface SessionManager {
   getExisting(feishuKey: string): Promise<string | undefined>
   getSession(feishuKey: string): SessionMapping | null
   deleteMapping(feishuKey: string): boolean
-  setMapping(feishuKey: string, sessionId: string, agent?: string): boolean
+  setMapping(feishuKey: string, sessionId: string, agent?: string, context?: SessionContextPatch): boolean
+  updateContext(feishuKey: string, patch: SessionContextPatch): boolean
   cleanup(maxAgeMs?: number): number
   /** Validate all stored mappings against the opencode server; delete stale ones. */
   validateAndCleanupStale(): Promise<number>
+}
+
+export interface SessionContextPatch {
+  sessionId?: string
+  projectId?: string | null
+  directory?: string | null
+  agent?: string
+  providerId?: string | null
+  modelId?: string | null
+  sessionTitle?: string | null
+  projectName?: string | null
+  branchName?: string | null
 }
 
 function getWorkingDirectory(): string {
@@ -43,6 +56,13 @@ export function createSessionManager(
       feishu_key  TEXT PRIMARY KEY,
       session_id  TEXT NOT NULL,
       agent       TEXT NOT NULL,
+      project_id  TEXT,
+      directory   TEXT,
+      provider_id TEXT,
+      model_id    TEXT,
+      session_title TEXT,
+      project_name TEXT,
+      branch_name TEXT,
       created_at  INTEGER NOT NULL,
       last_active INTEGER NOT NULL,
       is_bound    INTEGER DEFAULT 0
@@ -55,14 +75,45 @@ export function createSessionManager(
     // Column already exists — safe to ignore
   }
 
+  for (const column of [
+    "project_id TEXT",
+    "directory TEXT",
+    "provider_id TEXT",
+    "model_id TEXT",
+    "session_title TEXT",
+    "project_name TEXT",
+    "branch_name TEXT",
+  ]) {
+    try {
+      db.exec(`ALTER TABLE feishu_sessions ADD COLUMN ${column}`)
+    } catch {
+      // Column already exists — safe to ignore
+    }
+  }
+
   const getStmt = db.prepare(
     "SELECT * FROM feishu_sessions WHERE feishu_key = ?",
   )
 
   const upsertStmt = db.prepare(
     `INSERT OR REPLACE INTO feishu_sessions
-       (feishu_key, session_id, agent, created_at, last_active, is_bound)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+       (feishu_key, session_id, agent, project_id, directory, provider_id, model_id, session_title, project_name, branch_name, created_at, last_active, is_bound)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+
+  const updateContextStmt = db.prepare(
+    `UPDATE feishu_sessions
+       SET session_id = COALESCE(?, session_id),
+           agent = COALESCE(?, agent),
+           project_id = ?,
+           directory = ?,
+           provider_id = ?,
+           model_id = ?,
+           session_title = ?,
+           project_name = ?,
+           branch_name = ?,
+           last_active = ?
+     WHERE feishu_key = ?`,
   )
 
   const updateActiveStmt = db.prepare(
@@ -147,14 +198,28 @@ export function createSessionManager(
 
       if (discovered) {
         const now = Date.now()
-        upsertStmt.run(feishuKey, discovered.id, agentName, now, now, 1)
+        upsertStmt.run(
+          feishuKey,
+          discovered.id,
+          agentName,
+          null,
+          discovered.directory ?? null,
+          null,
+          null,
+          discovered.title ?? null,
+          projectNameFromDirectory(discovered.directory),
+          null,
+          now,
+          now,
+          1,
+        )
         logger.info(`Bound to TUI session: ${feishuKey} → ${discovered.id}`)
         return discovered.id
       }
 
       const sessionId = await createNewSession(feishuKey)
       const now = Date.now()
-      upsertStmt.run(feishuKey, sessionId, agentName, now, now, 0)
+      upsertStmt.run(feishuKey, sessionId, agentName, null, null, null, null, null, null, null, now, now, 0)
       logger.info(`Session created: ${feishuKey} → ${sessionId}`)
       return sessionId
     },
@@ -176,12 +241,48 @@ export function createSessionManager(
       return result.changes > 0
     },
 
-    setMapping(feishuKey, sessionId, agent) {
+    setMapping(feishuKey, sessionId, agent, context = {}) {
       const agentName = agent ?? defaultAgent
       const now = Date.now()
-      const result = upsertStmt.run(feishuKey, sessionId, agentName, now, now, 1)
+      const result = upsertStmt.run(
+        feishuKey,
+        sessionId,
+        context.agent ?? agentName,
+        context.projectId ?? null,
+        context.directory ?? null,
+        context.providerId ?? null,
+        context.modelId ?? null,
+        context.sessionTitle ?? null,
+        context.projectName ?? projectNameFromDirectory(context.directory),
+        context.branchName ?? null,
+        now,
+        now,
+        1,
+      )
       if (result.changes > 0) {
         logger.info(`Set session mapping: ${feishuKey} → ${sessionId}`)
+      }
+      return result.changes > 0
+    },
+
+    updateContext(feishuKey, patch) {
+      const current = getStmt.get(feishuKey) as SessionMapping | null
+      if (!current) return false
+      const result = updateContextStmt.run(
+        patch.sessionId ?? null,
+        patch.agent ?? null,
+        patch.projectId === undefined ? current.project_id ?? null : patch.projectId,
+        patch.directory === undefined ? current.directory ?? null : patch.directory,
+        patch.providerId === undefined ? current.provider_id ?? null : patch.providerId,
+        patch.modelId === undefined ? current.model_id ?? null : patch.modelId,
+        patch.sessionTitle === undefined ? current.session_title ?? null : patch.sessionTitle,
+        patch.projectName === undefined ? current.project_name ?? null : patch.projectName,
+        patch.branchName === undefined ? current.branch_name ?? null : patch.branchName,
+        Date.now(),
+        feishuKey,
+      )
+      if (result.changes > 0) {
+        logger.info(`Updated session context for ${feishuKey}`)
       }
       return result.changes > 0
     },
@@ -229,3 +330,7 @@ export function createSessionManager(
   }
 }
 
+function projectNameFromDirectory(directory: string | null | undefined): string | null {
+  if (!directory) return null
+  return directory.split("/").filter(Boolean).at(-1) ?? directory
+}

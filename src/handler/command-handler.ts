@@ -10,6 +10,8 @@ import type { SessionManager } from "../session/session-manager.js"
 import type { FeishuApiClient } from "../feishu/api-client.js"
 import type { Logger } from "../utils/logger.js"
 import type { FileBrowserRegistry } from "../file-browser/file-browser-registry.js"
+import type { OpencodeControlClient } from "../opencode/control-client.js"
+import type { SelectionPickerRegistry } from "../selection-picker/selection-picker-registry.js"
 
 // ── Dependency injection interface ──
 
@@ -19,6 +21,8 @@ export interface CommandHandlerDeps {
   feishuClient: FeishuApiClient
   logger: Logger
   fileBrowserRegistry?: FileBrowserRegistry
+  opencodeControlClient?: OpencodeControlClient
+  selectionPickerRegistry?: SelectionPickerRegistry
 }
 
 // ── Types ──
@@ -34,80 +38,10 @@ export type CommandHandler = (
 interface Session {
   id: string
   title?: string
-  time?: { created: number; updated: number }
-  summary?: { additions: number; deletions: number; files: number }
+  directory?: string
 }
 
 // ── Card builders ──
-
-function formatRelativeTime(timestamp: number): string {
-  const now = Date.now()
-  const diffMs = Math.max(0, now - timestamp)
-  const diffMin = Math.floor(diffMs / 60_000)
-
-  if (diffMin < 1) return "刚刚"
-  if (diffMin < 60) return `${diffMin}分钟前`
-
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}小时前`
-
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}天前`
-}
-
-function truncateTitle(title: string, maxChars = 30): string {
-  const trimmed = title.trim()
-  if (trimmed.length <= maxChars) return trimmed
-  if (maxChars <= 3) return trimmed.slice(0, maxChars)
-  return trimmed.slice(0, maxChars - 3) + "..."
-}
-
-function buildSessionsCard(sessions: Session[], currentSessionId?: string): Record<string, unknown> {
-  const recentSessions = sessions.slice(0, 10)
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: {
-        tag: "plain_text",
-        content: "📋 选择会话",
-      },
-      template: "blue",
-    },
-    elements: [
-      {
-        tag: "markdown",
-        content: "**点击连接到对应会话：**",
-      },
-      ...recentSessions.map((s) => {
-        const isCurrentSession = s.id === currentSessionId
-        const title = s.title?.trim() ? truncateTitle(s.title) : "未命名会话"
-        const relative = s.time?.updated
-          ? formatRelativeTime(s.time.updated)
-          : "未知时间"
-        const filesSegment =
-          typeof s.summary?.files === "number" ? `${s.summary.files}文件` : null
-
-        const segments = [title, relative, filesSegment].filter(
-          (v): v is string => typeof v === "string" && v.length > 0,
-        )
-        const label = `${isCurrentSession ? "▶ " : ""}${segments.join(" · ")}`
-        return {
-          tag: "action",
-          actions: [
-            {
-              tag: "button",
-              text: {
-                tag: "plain_text",
-                content: label,
-              },
-              value: { action: "command_execute", command: `/connect ${s.id}` },
-            },
-          ],
-        }
-      }),
-    ],
-  }
-}
 
 // ── Help card builder ──
 
@@ -139,6 +73,16 @@ function buildHelpCard(): Record<string, unknown> {
             tag: "button",
             text: { tag: "plain_text", content: "🔌 连接会话" },
             value: { action: "command_execute", command: "/sessions" },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "🤖 切换智能体" },
+            value: { action: "command_execute", command: "/agents" },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "🧩 切换模型" },
+            value: { action: "command_execute", command: "/models" },
           },
           {
             tag: "button",
@@ -260,7 +204,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
 
     const data = (await resp.json()) as { id: string }
     sessionManager.deleteMapping(feishuKey)
-    sessionManager.setMapping(feishuKey, data.id)
+    sessionManager.setMapping(feishuKey, data.id, undefined, { sessionTitle: `Feishu chat ${feishuKey}` })
     logger.info(`/new: created session ${data.id}, bound ${feishuKey}`)
     await replyText(chatId, messageId, `已创建并切换到新会话: ${data.id}`)
   }
@@ -293,42 +237,69 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     feishuKey: string,
     chatId: string,
     messageId: string,
+    senderOpenId?: string,
   ): Promise<void> {
-    const resp = await fetch(`${serverUrl}/session`)
-    if (!resp.ok) {
-      throw new Error(`List sessions failed: HTTP ${resp.status}`)
-    }
+    await openSelectionPicker("sessions", feishuKey, chatId, messageId, senderOpenId)
+  }
 
-    let sessions = (await resp.json()) as Session[]
-    if (sessions.length === 0) {
-      await replyText(chatId, messageId, "暂无会话。")
+  async function handleAgents(
+    feishuKey: string,
+    chatId: string,
+    messageId: string,
+    senderOpenId?: string,
+  ): Promise<void> {
+    await openSelectionPicker("agents", feishuKey, chatId, messageId, senderOpenId)
+  }
+
+  async function handleModels(
+    feishuKey: string,
+    chatId: string,
+    messageId: string,
+    senderOpenId?: string,
+  ): Promise<void> {
+    await openSelectionPicker("models", feishuKey, chatId, messageId, senderOpenId)
+  }
+
+  async function openSelectionPicker(
+    kind: "sessions" | "agents" | "models",
+    feishuKey: string,
+    chatId: string,
+    messageId: string,
+    senderOpenId?: string,
+  ): Promise<void> {
+    if (!deps.selectionPickerRegistry) throw new Error("当前版本未启用选择器")
+    if (!senderOpenId) {
+      await replyText(chatId, messageId, "无法确认操作用户，不能打开选择器。")
       return
     }
+    await deps.selectionPickerRegistry.open({ kind, feishuKey, chatId, replyToMessageId: messageId, operatorOpenId: senderOpenId })
+  }
 
-    // Get current bound session for this chat
-    const currentSessionId = await sessionManager.getExisting(feishuKey)
-
-    if (currentSessionId) {
-      // Check if it's already in the list
-      const existingIndex = sessions.findIndex((s) => s.id === currentSessionId)
-      if (existingIndex >= 0) {
-        // Move it to top
-        const current = sessions.splice(existingIndex, 1)[0]
-        if (current) {
-          sessions.unshift(current)
-        }
-      } else {
-        // Not in API response at all — add it manually at top
-        const now = Date.now()
-        sessions.unshift({ id: currentSessionId, title: "当前会话", time: { created: now, updated: now } })
-      }
+  async function handleAgentSelect(feishuKey: string, chatId: string, messageId: string, agentId: string): Promise<void> {
+    if (!agentId) {
+      await replyText(chatId, messageId, "用法: /agent {agent}")
+      return
     }
+    if (!sessionManager.updateContext(feishuKey, { agent: agentId })) {
+      await replyText(chatId, messageId, "当前没有绑定的会话。")
+      return
+    }
+    await replyText(chatId, messageId, `已切换智能体: ${agentId}`)
+  }
 
-    const card = buildSessionsCard(sessions, currentSessionId)
-    await feishuClient.replyMessage(messageId, {
-      msg_type: "interactive",
-      content: JSON.stringify(card),
-    })
+  async function handleModelSelect(feishuKey: string, chatId: string, messageId: string, modelValue: string): Promise<void> {
+    const separator = modelValue.indexOf(":")
+    if (separator <= 0 || separator === modelValue.length - 1) {
+      await replyText(chatId, messageId, "用法: /model {provider}:{model}")
+      return
+    }
+    const providerId = modelValue.slice(0, separator)
+    const modelId = modelValue.slice(separator + 1)
+    if (!sessionManager.updateContext(feishuKey, { providerId, modelId })) {
+      await replyText(chatId, messageId, "当前没有绑定的会话。")
+      return
+    }
+    await replyText(chatId, messageId, `已切换模型: ${providerId}/${modelId}`)
   }
 
   async function handleConnect(
@@ -343,12 +314,23 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       await replyText(chatId, messageId, "会话不存在。")
       return
     }
+    const sessionInfo = typeof checkResp.json === "function"
+      ? await checkResp.json().catch(() => null) as Session | null
+      : null
+    const branch = sessionInfo?.directory
+      ? (await deps.opencodeControlClient?.getVcs(sessionInfo.directory).catch((): { branch?: string } => ({})))?.branch
+      : undefined
 
     // Unbind current mapping if exists
     sessionManager.deleteMapping(feishuKey)
 
     // Set new mapping
-    const success = sessionManager.setMapping(feishuKey, targetSessionId)
+    const success = sessionManager.setMapping(feishuKey, targetSessionId, undefined, {
+      sessionTitle: sessionInfo?.title ?? null,
+      directory: sessionInfo?.directory ?? null,
+      projectName: projectNameFromDirectory(sessionInfo?.directory),
+      branchName: branch ?? null,
+    })
     if (success) {
       logger.info(`/connect: bound ${feishuKey} to session ${targetSessionId}`)
       await replyText(chatId, messageId, `已连接到会话: ${targetSessionId}`)
@@ -439,7 +421,23 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
           return true
 
         case "/sessions":
-          await handleSessions(feishuKey, chatId, messageId)
+          await handleSessions(feishuKey, chatId, messageId, senderOpenId)
+          return true
+
+        case "/agents":
+          await handleAgents(feishuKey, chatId, messageId, senderOpenId)
+          return true
+
+        case "/models":
+          await handleModels(feishuKey, chatId, messageId, senderOpenId)
+          return true
+
+        case "/agent":
+          await handleAgentSelect(feishuKey, chatId, messageId, parts[1] ?? "")
+          return true
+
+        case "/model":
+          await handleModelSelect(feishuKey, chatId, messageId, parts[1] ?? "")
           return true
 
         case "/files":
@@ -484,4 +482,9 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       return true
     }
   }
+}
+
+function projectNameFromDirectory(directory: string | undefined | null): string | null {
+  if (!directory) return null
+  return directory.split("/").filter(Boolean).at(-1) ?? directory
 }

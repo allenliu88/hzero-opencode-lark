@@ -9,6 +9,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Features
 
 - Added a read-only `/files` remote workspace browser with Card JSON 2.0 directory rows, `📁`/`📄` icons, full session IDs, a single-line navigation area, lazy directory navigation, 60-line text pagination, per-user authorization, sensitive-file filtering, view-token/action-ID callback safety, request timeouts, and limited card-update retries.
+- Added Agent, Model, and Session Card JSON 2.0 pickers with eight-row in-place pagination, full-width rows, per-user authorization, opaque entry keys, rotating stale-view protection, in-flight duplicate suppression, and OpenCode Web-compatible directory-scoped APIs.
+- Added an Agent Console runtime-context footer showing the session, project branch, agent, actual `providerID/modelID`, and command help including `/files`. The model is synchronized from Session responses and User/Assistant message events and updates the live card.
+
+### Changed
+
+- Extended persisted Feishu thread mappings with session title, directory, project/branch, Agent, provider, and model context. Selecting a different Session replaces the mapping and resets earlier Agent/Model overrides unless they are selected again.
+- Selected Agent and provider/model overrides are sent with subsequent OpenCode prompts. HTTP 400 or 422 responses trigger one compatibility retry with `{ parts }` only; persisted selections are retained for later turns.
+- Agent Console model context is initialized from the Session response and then updated by eligible User or Assistant `message.updated` events in event-arrival order.
+- Command-menu cards are replaced immediately after selection and duplicate execution is suppressed by card message ID for the current process lifetime. This guard is not persisted and does not currently enforce creator-only access.
+
+### Fixed
+
+- Replaced ambiguous "default model" footer text with the actual `providerID/modelID` when available and `Unknown model` when OpenCode has not resolved one.
 
 ## 0.1.21 (2026-03-04)
 

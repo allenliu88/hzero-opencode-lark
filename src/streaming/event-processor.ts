@@ -66,6 +66,14 @@ export interface PermissionRequested {
   readonly metadata: Record<string, unknown>
 }
 
+export interface MessageModelResolved {
+  readonly type: "MessageModelResolved"
+  readonly sessionId: string
+  readonly messageId: string
+  readonly providerId: string
+  readonly modelId: string
+}
+
 export type ProcessedAction =
   | TextDelta
   | ToolStateChange
@@ -73,6 +81,7 @@ export type ProcessedAction =
   | SessionIdle
   | QuestionAsked
   | PermissionRequested
+  | MessageModelResolved
 
 // ---------------------------------------------------------------------------
 // Input event shapes (from actual opencode SSE stream)
@@ -114,6 +123,9 @@ interface MessageUpdatedEvent {
       id: string
       sessionID: string
       role: "user" | "assistant"
+      model?: { providerID?: string; modelID?: string }
+      providerID?: string
+      modelID?: string
     }
   }
 }
@@ -268,13 +280,22 @@ export class EventProcessor {
   // Private handlers
   // -------------------------------------------------------------------------
 
-  private processMessageUpdated(event: MessageUpdatedEvent): null {
+  private processMessageUpdated(event: MessageUpdatedEvent): MessageModelResolved | null {
     const info = event.properties?.info
     if (!info || typeof info.id !== "string") return null
     if (info.role !== "user" && info.role !== "assistant") return null
     if (this.messageRoles.size >= 10_000) this.messageRoles.clear()
     this.messageRoles.set(info.id, info.role)
-    return null
+    const providerId = info.role === "user" ? info.model?.providerID : info.providerID
+    const modelId = info.role === "user" ? info.model?.modelID : info.modelID
+    if (!providerId || !modelId || !this.ownedSessions.has(info.sessionID)) return null
+    return {
+      type: "MessageModelResolved",
+      sessionId: info.sessionID,
+      messageId: info.id,
+      providerId,
+      modelId,
+    }
   }
 
   private processMessagePartUpdated(

@@ -18,6 +18,28 @@ export interface AgentConsoleOptions {
   chatId: string
   replyToMessageId?: string
   requestText?: string
+  controls?: AgentConsoleControls
+}
+
+export interface AgentConsoleSelectOption {
+  value: string
+  label: string
+}
+
+export interface AgentConsoleSelectControl {
+  placeholder: string
+  initialValue?: string
+  options: AgentConsoleSelectOption[]
+}
+
+export interface AgentConsoleControls {
+  sessionId?: string
+  sessionTitle?: string
+  agentLabel?: string
+  modelLabel?: string
+  projectName?: string
+  branchName?: string
+  canAbort: boolean
 }
 
 export type AgentConsoleStatus =
@@ -113,6 +135,9 @@ const ANSWER_ELEMENT_ID = "answer"
 const INTERACTION_ELEMENT_ID = "interaction"
 const NAVIGATION_ELEMENT_ID = "session_navigation"
 const TASK_LINKS_ELEMENT_ID = "task_links"
+const CONTROLS_HR_ELEMENT_ID = "agentCtlHr"
+const CONTROLS_ELEMENT_ID = "agentCtl"
+const CONTROLS_INFO_ELEMENT_ID = "agentCtlInfo"
 export const ANSWER_ELEMENT_MAX_BYTES = 18 * 1024
 const TIMELINE_VISIBLE_LIMIT = 5
 const UPDATE_INTERVAL_MS = 300
@@ -131,6 +156,7 @@ export class AgentConsoleSession {
   private readonly chatId: string
   private readonly replyToMessageId?: string
   private readonly requestText?: string
+  private controls: AgentConsoleControls | undefined
 
   private state: CardState | null = null
   private startPromise: Promise<void> | null = null
@@ -158,6 +184,7 @@ export class AgentConsoleSession {
   private readonly childViews = new Map<string, ChildViewState>()
   private navigationVisible = false
   private taskLinksVisible = false
+  private controlsVisible = false
   private navigationSignature = ""
 
   constructor(options: AgentConsoleOptions) {
@@ -166,6 +193,7 @@ export class AgentConsoleSession {
     this.chatId = options.chatId
     this.replyToMessageId = options.replyToMessageId
     this.requestText = options.requestText
+    this.controls = options.controls
   }
 
   get isActive(): boolean {
@@ -197,7 +225,7 @@ export class AgentConsoleSession {
     const cardJson: CardKitSchema = {
       schema: "2.0",
       header: {
-        title: { tag: "plain_text", content: "🧠 飞码智能体" },
+        title: { tag: "plain_text", content: this.controls?.projectName ? `🧠 飞码智能体 · ${this.controls.projectName}#${this.controls.branchName || "未知分支"}` : "🧠 飞码智能体" },
         template: "blue",
       },
       config: {
@@ -210,6 +238,7 @@ export class AgentConsoleSession {
         elements: [
           { tag: "markdown", content: initialProgress, element_id: PROGRESS_ELEMENT_ID },
           { tag: "markdown", content: "", element_id: ANSWER_ELEMENT_ID },
+          ...buildControlElements(this.controls),
         ],
       },
     }
@@ -231,6 +260,7 @@ export class AgentConsoleSession {
     this.state = { cardId, messageId, sequence: 1 }
     this.lastSentContent.set(PROGRESS_ELEMENT_ID, initialProgress)
     this.lastSentContent.set(ANSWER_ELEMENT_ID, "")
+    this.controlsVisible = hasVisibleControls(this.controls)
     this.lastVisibleUpdateAt = Date.now()
     this.lastUpdateStartedAt = Date.now()
     this.startHeartbeat()
@@ -626,6 +656,12 @@ export class AgentConsoleSession {
     await this.enqueueUpdate(elementId, this.answerText)
   }
 
+  async setControls(controls?: AgentConsoleControls): Promise<void> {
+    this.controls = controls
+    if (!this.state || this.closed || this.closing || !hasVisibleControls(controls)) return
+    await this.enqueueUpdate(CONTROLS_INFO_ELEMENT_ID, controlInfoText(controls))
+  }
+
   async close(options: AgentConsoleCloseOptions = {}): Promise<void> {
     if (!this.state || this.closed || this.closing) return
     this.closing = true
@@ -837,6 +873,17 @@ export class AgentConsoleSession {
     const mutation = this.interactionMutation.then(operation)
     this.interactionMutation = mutation.catch(() => {})
     await mutation
+  }
+
+  private async deleteControlsIfVisible(): Promise<void> {
+    if (!this.state || !this.controlsVisible) return
+    this.state.sequence += 1
+    await this.cardkitClient.deleteElement(this.state.cardId, CONTROLS_ELEMENT_ID, this.state.sequence)
+    this.state.sequence += 1
+    await this.cardkitClient.deleteElement(this.state.cardId, CONTROLS_INFO_ELEMENT_ID, this.state.sequence)
+    this.state.sequence += 1
+    await this.cardkitClient.deleteElement(this.state.cardId, CONTROLS_HR_ELEMENT_ID, this.state.sequence)
+    this.controlsVisible = false
   }
 
   private async enqueueUpdate(elementId: string, content: string): Promise<void> {
@@ -1121,6 +1168,32 @@ function buildChildNavigation(child: ChildViewState): CardElement {
   }
 }
 
+function buildControlElements(controls?: AgentConsoleControls): CardElement[] {
+  if (!hasVisibleControls(controls)) return []
+  return [
+    { tag: "hr", element_id: CONTROLS_HR_ELEMENT_ID },
+    {
+      tag: "markdown",
+      element_id: CONTROLS_INFO_ELEMENT_ID,
+      content: controlInfoText(controls),
+    },
+  ]
+}
+
+function hasVisibleControls(controls?: AgentConsoleControls): boolean {
+  return Boolean(controls)
+}
+
+function controlInfoText(controls?: AgentConsoleControls): string {
+  const sessionId = controls?.sessionId || "未知Session"
+  const sessionTitle = controls?.sessionTitle || "未命名会话"
+  const project = controls?.projectName || "未知项目"
+  const branch = controls?.branchName || "未知分支"
+  const agent = controls?.agentLabel || "未指定"
+  const model = controls?.modelLabel?.replace(":", "/") || "未知模型"
+  return `**当前上下文**：会话 \`${escapeCode(sessionTitle)}\` · \`${escapeCode(sessionId)}\` · 项目 \`${escapeCode(`${project}#${branch}`)}\` · 智能体 \`${escapeCode(agent)}\` · 模型 \`${escapeCode(model)}\`\n**帮助**：\`/agents\` 切换智能体 · \`/models\` 切换模型 · \`/sessions\` 切换会话 · \`/files\` 浏览文件 · \`/abort\` 中止 · \`/help\` 帮助`
+}
+
 function renderChildProgress(child: ChildViewState): string {
   const timeline = child.items.length === 0 && child.outputStartedAt
     ? ""
@@ -1241,6 +1314,10 @@ function truncate(value: string, max = 120): string {
 
 function escapeMarkdown(value: string): string {
   return value.replace(/([\\*_`])/g, "\\$1")
+}
+
+function escapeCode(value: string): string {
+  return value.replaceAll("`", "\\`")
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

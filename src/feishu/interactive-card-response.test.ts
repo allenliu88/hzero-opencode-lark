@@ -61,6 +61,22 @@ describe("interactive-card-response", () => {
     })
   })
 
+  it("acknowledges agent console control actions", () => {
+    const response = buildInteractiveCallbackResponse({
+      action: {
+        tag: "button",
+        value: { action: "agent_console_abort" },
+      },
+      open_message_id: "msg-console",
+      open_chat_id: "chat-1",
+      operator: { open_id: "ou-1" },
+    })
+
+    expect(response).toEqual({
+      toast: { type: "success", content: "已发送中止请求" },
+    })
+  })
+
   it("shows multiple form selections in the callback toast", () => {
     const response = buildInteractiveCallbackResponse({
       action: {

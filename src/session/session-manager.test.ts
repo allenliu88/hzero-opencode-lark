@@ -286,6 +286,23 @@ describe("session-manager", () => {
       sm = createSessionManager({ serverUrl: SERVER_URL, db, defaultAgent: DEFAULT_AGENT })
       expect(sm).toBeDefined()
     })
+
+    it("updates extended session context without replacing existing values", () => {
+      sm = createSessionManager({ serverUrl: SERVER_URL, db, defaultAgent: DEFAULT_AGENT })
+      expect(sm.setMapping("chat-context", "ses-1", "build", { projectId: "proj-1", directory: "/repo" })).toBe(true)
+
+      expect(sm.updateContext("chat-context", { providerId: "anthropic", modelId: "claude-sonnet-4" })).toBe(true)
+
+      const mapping = sm.getSession("chat-context")
+      expect(mapping).toMatchObject({
+        session_id: "ses-1",
+        agent: "build",
+        project_id: "proj-1",
+        directory: "/repo",
+        provider_id: "anthropic",
+        model_id: "claude-sonnet-4",
+      })
+    })
   })
 
   describe("discoverTuiSession validation", () => {

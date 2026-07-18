@@ -248,6 +248,59 @@ describe("createStreamingBridge", () => {
     expect(onComplete).toHaveBeenCalledWith("（无回复）")
   })
 
+  it("hydrates project and branch context before creating the Agent Console card", async () => {
+    const sessionManager = {
+      getSession: vi.fn()
+        .mockReturnValueOnce({ feishu_key: "chat-1", session_id: "ses-1", agent: "build", created_at: 1, last_active: 1 })
+        .mockReturnValue({ feishu_key: "chat-1", session_id: "ses-1", agent: "build", directory: "/repo/opencode-lark", project_name: "opencode-lark", branch_name: "main", session_title: "Work", created_at: 1, last_active: 1 }),
+      updateContext: vi.fn().mockReturnValue(true),
+    }
+    const opencodeControlClient = {
+      getSession: vi.fn().mockResolvedValue({
+        id: "ses-1",
+        title: "Work",
+        directory: "/repo/opencode-lark",
+        model: { providerId: "anthropic", modelId: "claude-sonnet-4" },
+      }),
+      getVcs: vi.fn().mockResolvedValue({ branch: "main" }),
+    }
+    const deps = makeDeps({
+      sessionManager: sessionManager as any,
+      opencodeControlClient: opencodeControlClient as any,
+      feishuClient: {
+        ...createMockFeishuClient(),
+        replyMessage: vi.fn().mockResolvedValue({ code: 0, data: { message_id: "msg_456" } }),
+      },
+    })
+    const bridge = createStreamingBridge(deps)
+    const handlePromise = bridge.handleMessage("chat-1", "ses-1", eventListeners, eventProcessor, mockSendMessage, vi.fn(), "msg_original", null, undefined, "chat-1")
+    await waitFor(() => expect(eventListeners.size).toBe(1))
+    const listener = [...eventListeners.get("ses-1")!][0]!
+    listener({ type: "message.part.updated", properties: { part: { sessionID: "ses-1", messageID: "m-title", type: "text", text: "Hello" }, delta: "Hello" } })
+    await new Promise((resolve) => setTimeout(resolve, 550))
+    await waitFor(() => expect((deps.cardkitClient as any).createCard).toHaveBeenCalled())
+    const card = (deps.cardkitClient as any).createCard.mock.calls[0][0]
+    expect(card.header.title.content).toBe("🧠 飞码智能体 · opencode-lark#main")
+    expect(sessionManager.updateContext).toHaveBeenCalledWith("chat-1", expect.objectContaining({
+      directory: "/repo/opencode-lark",
+      branchName: "main",
+      providerId: "anthropic",
+      modelId: "claude-sonnet-4",
+    }))
+    listener({
+      type: "message.updated",
+      properties: {
+        info: { id: "assistant-model", sessionID: "ses-1", role: "assistant", providerID: "openai", modelID: "gpt-5" },
+      },
+    })
+    await waitFor(() => expect(sessionManager.updateContext).toHaveBeenCalledWith("chat-1", {
+      providerId: "openai",
+      modelId: "gpt-5",
+    }))
+    listener({ type: "session.status", properties: { sessionID: "ses-1", status: { type: "idle" } } })
+    await handlePromise
+  })
+
   it("accumulates TextDelta and buffers text locally", async () => {
     const deps = makeDeps({
       feishuClient: {

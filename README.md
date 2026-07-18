@@ -15,13 +15,14 @@
 - **Real-time bridging** — Messages sent in Feishu arrive in your opencode TUI instantly, and agent replies stream back as live-updating cards.
 - **Interactive cards** — Agent questions and permission requests appear as clickable Feishu cards. Answer or approve directly from the chat — no need to switch to the TUI.
 - **WebSocket connection** — Uses Feishu's long-lived WebSocket mode. No webhook polling, no public IP required.
-- **SSE streaming** — Consumes the opencode SSE event stream and debounces card updates to stay within rate limits.
-- **Conversation memory** — SQLite-backed per-thread history is prepended to each message, giving the agent context across turns.
-- **Session auto-discovery** — Finds and binds to the latest opencode TUI session for a working directory. Survives restarts.
+- **SSE streaming** — Consumes the opencode SSE event stream and serializes/coalesces card updates to stay within rate limits.
+- **Conversation continuity** — SQLite persists each Feishu chat/thread's OpenCode session mapping. Conversation history remains in the OpenCode session rather than being prepended from a separate local transcript.
+- **Clean session binding** — Creates a clean OpenCode session for a new Feishu mapping by default. Optional legacy TUI auto-discovery and explicit `/sessions` or `/connect` binding are supported.
 - **Graceful recovery** — Reconnects to the opencode server with exponential backoff (up to 10 attempts) on startup.
 - **Extensible channel layer** — `ChannelPlugin` interface lets you add Slack, Discord, or any other platform without touching core logic.
 - **File and image support** — Handles image and file messages from Feishu (not just text). Downloads attachments to `${OPENCODE_CWD}/.opencode-lark/attachments/` and forwards the local path to opencode for analysis. 50 MB size limit, streaming download, filename sanitization included.
 - **Remote file browser** — Use `/files` or `/files src` to browse the current OpenCode session's server-side workspace and preview text files in a paginated interactive card without invoking a model.
+- **Runtime context panel** — The Agent Console footer shows the current session, project branch, agent, and the actual `providerID/modelID` used for the turn. `/agents`, `/models`, and `/sessions` use secure eight-row paginated picker cards.
 
 ---
 
@@ -41,9 +42,9 @@ opencode TUI
 
 > `opencode serve` runs the HTTP server. Use `opencode attach` in a separate terminal to view the session in TUI.
 
-**Inbound (Feishu → TUI):** Feishu sends a message over WebSocket. opencode-lark normalizes it, resolves the bound session, prepends conversation history, then POSTs to the opencode API. The TUI sees the message immediately.
+**Inbound (Feishu → TUI):** Feishu sends a message over WebSocket. opencode-lark normalizes it, resolves the bound OpenCode session, and POSTs the message with the persisted Agent/Model overrides when available. OpenCode owns the conversation history for that session.
 
-**Outbound (TUI → Feishu):** opencode-lark subscribes to the opencode SSE stream. As the agent produces text, `TextDelta` events accumulate and a debounced card update fires. Once `SessionIdle` arrives, the final card is flushed to Feishu.
+**Outbound (TUI → Feishu):** opencode-lark subscribes to the opencode SSE stream. As the agent produces text, `TextDelta` events accumulate and the latest card state is serialized/coalesced into bounded updates. Once `SessionIdle` arrives, the final card is flushed to Feishu.
 
 ### Supported Message Types
 
@@ -62,6 +63,14 @@ Downloaded files are saved to `${OPENCODE_CWD}/.opencode-lark/attachments/` (fal
 Send `/files` to browse the root directory of the OpenCode session currently bound to the Feishu chat or thread. Send `/files src` to start from a project-relative directory. Directory and file navigation updates the same Card JSON 2.0 card; only the user who opened the card can operate it. Directory rows use `📁`/`📄` icons and a full-width clickable name. Parent, root, refresh, and pagination actions share one non-wrapping row.
 
 The browser is read-only, previews text files up to 1 MiB in 60-line pages, and blocks common secret files such as `.env`, private keys, and certificates. Files are read through the OpenCode Server file API, so they come from the OpenCode server host rather than the `opencode-lark` host. Interactive navigation requires the `card.action.trigger` callback subscription. Each card view uses an expiring token and idempotent action IDs; OpenCode requests have bounded timeouts and Feishu card updates use limited retries.
+
+### Runtime Context and Pickers
+
+The Agent Console footer shows the session title and ID, project and branch, agent, and the actual `providerID/modelID` used for the current turn. The model is resolved from OpenCode message events when available and updates the live card; the Session API and persisted mapping are fallbacks. The help line includes `/agents`, `/models`, `/sessions`, `/files`, `/abort`, and `/help`.
+
+Send `/agents`, `/models`, or `/sessions` to open a Card JSON 2.0 picker. Each picker displays up to eight rows per page and updates the same card for previous/next navigation. Only the user who opened the picker can operate it. Hidden/subagent agents, deprecated models, archived sessions, and child sessions are excluded. When OpenCode supplies a `connected` provider list, disconnected providers are also excluded; older responses without that field retain all parsed providers for compatibility. Direct `/agent {id}` and `/model {provider}:{model}` commands remain available.
+
+In group topics, type slash commands directly. Command-menu card callbacks currently retain only the chat ID as a best-effort mapping key, while typed commands preserve the complete topic/thread key.
 
 ---
 
@@ -132,15 +141,13 @@ The service starts automatically after setup completes.
 
 **4. Send a test message**
 
-Send any message to your Feishu bot. On first contact it auto-discovers the latest TUI session and replies:
+Send any message to your Feishu bot. On first contact, opencode-lark creates a clean OpenCode session for that Feishu chat or thread. Use `/sessions` or `/connect {session_id}` to bind an existing session. To restore the legacy latest-TUI-session discovery behavior, set `session.autoDiscoverTui` to `true`; the default is `false`.
 
-> Connected to session: ses_xxxxx
-
-After that, Feishu and the TUI share a live two-way channel. To attach the TUI:
+To attach the TUI after identifying the session ID from logs or `/sessions`:
 ```bash
 opencode attach http://127.0.0.1:4096 --session {session_id}
 ```
-The `session_id` is shown in opencode-lark's startup logs (e.g. `Bound to TUI session: ... → ses_xxxxx`).
+When auto-discovery is enabled, the binding is also shown in logs (for example, `Bound to TUI session: ... → ses_xxxxx`).
 
 ---
 
@@ -253,7 +260,7 @@ Navigate to **Development Config → Event Subscriptions → Callback Subscripti
 | Bot doesn't receive messages | WebSocket not enabled or wrong subscription | Check event subscription, ensure Long Connection mode is selected |
 | "Invalid App ID or Secret" | Wrong credentials in .env | Double-check App ID and App Secret from Step 3 |
 | Messages received but no reply | opencode server not running | Ensure opencode server is running: `OPENCODE_SERVER_PORT=4096 opencode serve` |
-| Card not updating in real-time | Rate limit or debounce delay | Normal behavior — updates are debounced to stay within Feishu rate limits |
+| Card not updating in real-time | Rate limit or update interval | Normal behavior — updates are serialized and coalesced with a minimum interval |
 | Error `200340` when clicking card buttons | Callback subscription not configured | Go to **Callback Subscription** (回调订阅) → select Long Connection → add `card.action.trigger` |
 | "应用未建立长连接" when saving Long Connection mode | App not running — Feishu requires an active WebSocket connection before saving | Start opencode-lark first (Step 6), then save the setting in Feishu console |
 
@@ -292,6 +299,11 @@ Navigate to **Development Config → Event Subscriptions → Callback Subscripti
   // Common values: "build", "claude", "code" — check your opencode config for available agents.
   "defaultAgent": "build",
   "dataDir": "./data",
+  "session": {
+    // false creates a clean session for each new Feishu mapping.
+    // true restores legacy latest-TUI-session discovery for OPENCODE_CWD.
+    "autoDiscoverTui": false
+  },
   "progress": {
     "debounceMs": 500,
     "maxDebounceMs": 3000
@@ -358,7 +370,10 @@ src/
 ├── types.ts         # Shared type definitions
 ├── channel/         # ChannelPlugin interface, ChannelManager, FeishuPlugin
 ├── feishu/          # Feishu REST client, CardKit, WebSocket, message dedup
+├── file-browser/    # Remote OpenCode workspace browser
 ├── handler/         # MessageHandler (inbound pipeline) + StreamingBridge (SSE → cards)
+├── opencode/        # Directory-scoped OpenCode control API adapter
+├── selection-picker/ # Agent/Model/Session picker registry
 ├── session/         # TUI session discovery, thread→session mapping, progress cards
 ├── streaming/       # EventProcessor (SSE parsing), SessionObserver, SubAgentTracker
 ├── cron/            # CronService (scheduled jobs) + HeartbeatService

@@ -26,7 +26,7 @@ log.error({ err }, "something went wrong")
 Never use `console.log` anywhere in the codebase. The logger writes structured JSON in production and pretty-printed output in dev (controlled by `LOG_FORMAT` env var).
 
 ### `db.ts`
-Initializes the SQLite databases using `bun:sqlite`. Exports `initDatabase(dataDir)` which returns an `AppDatabase` object containing `sessions` and `memory` `Database` handles plus a `close()` method. Enables WAL mode for better concurrent read performance. Import and call this once at startup (Phase 3 in `src/index.ts`) — all other modules that need SQLite should receive the `Database` handle via dependency injection, not open their own connection.
+Initializes the SQLite databases using `bun:sqlite`. Exports `initDatabase(dataDir)` which returns an `AppDatabase` object containing the active `sessions` handle and a legacy `memory` database handle plus a `close()` method. The memory feature/module has been removed; do not treat this handle as conversation-history injection. Enables WAL mode for both files. Import and call this once at startup (Phase 3 in `src/index.ts`) — all other modules that need SQLite should receive a handle via dependency injection, not open their own connection.
 
 ### `event-listeners.ts`
 A typed `Map<string, Set<listener>>` with `addListener(map, sessionId, fn)` and `removeListener(map, sessionId, fn)` helper functions. The map type is exported as `EventListenerMap`. Used by `StreamingBridge`, `SessionObserver`, and `src/index.ts` to manage per-session event subscriptions without leaking listeners. Always call `removeListener` when you're done with a subscription.

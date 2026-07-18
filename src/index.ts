@@ -51,6 +51,8 @@ import { loadEnvFile } from "./utils/env-loader.js"
 import { needsSetup, runSetupWizard, pickConfig } from "./cli/setup-wizard.js"
 import { createRemoteFileClient } from "./file-browser/remote-file-client.js"
 import { FileBrowserRegistry } from "./file-browser/file-browser-registry.js"
+import { createOpencodeControlClient } from "./opencode/control-client.js"
+import { SelectionPickerRegistry } from "./selection-picker/selection-picker-registry.js"
 
 const logger = createLogger("opencode-lark")
 
@@ -189,6 +191,17 @@ async function main(): Promise<void> {
     feishuClient,
     logger,
   )
+  const opencodeControlClient = createOpencodeControlClient({
+    serverUrl,
+    logger,
+    fallbackAgents: [config.defaultAgent],
+  })
+  const selectionPickerRegistry = new SelectionPickerRegistry(
+    opencodeControlClient,
+    sessionManager,
+    feishuClient,
+    logger,
+  )
 
   const eventProcessor = new EventProcessor({ ownedSessions, logger })
 
@@ -211,6 +224,9 @@ async function main(): Promise<void> {
     activeSessions: activeStreamingSessions,
     ownedSessions,
     agentConsoleRegistry,
+    sessionManager,
+    opencodeControlClient,
+    selectionPickerRegistry,
     outboundMedia,
   })
 
@@ -231,6 +247,8 @@ async function main(): Promise<void> {
     feishuClient,
     logger,
     fileBrowserRegistry,
+    opencodeControlClient,
+    selectionPickerRegistry,
   })
 
   const { handleMessage, dispose: disposeDebouncer } = createMessageHandler({
@@ -286,7 +304,19 @@ async function main(): Promise<void> {
     if (actionType === "view_subagent") {
       return subAgentCardHandler(action)
     }
-    if (actionType === "agent_console_view_child" || actionType === "agent_console_back") {
+    if (
+      actionType === "agent_console_view_child" ||
+      actionType === "agent_console_back" ||
+      actionType === "agent_console_switch_agent" ||
+      actionType === "agent_console_switch_model" ||
+      actionType === "agent_console_switch_project" ||
+      actionType === "agent_console_select_session" ||
+      actionType === "agent_console_open_agent_picker" ||
+      actionType === "agent_console_open_model_picker" ||
+      actionType === "agent_console_open_session_picker" ||
+      actionType === "agent_console_open_project_picker" ||
+      actionType === "agent_console_abort"
+    ) {
       return agentConsoleRegistry.handle(action).then((handled) => {
         if (!handled) logger.warn(`Ignored stale or invalid Agent Console action for ${action.open_message_id}`)
       })
@@ -294,6 +324,11 @@ async function main(): Promise<void> {
     if (actionType?.startsWith("file_browser_")) {
       const result = fileBrowserRegistry.enqueue(action)
       if (!result.handled) logger.warn(`Ignored invalid file browser action for ${action.open_message_id}`)
+      return result.response ?? {}
+    }
+    if (actionType?.startsWith("selection_picker_")) {
+      const result = selectionPickerRegistry.enqueue(action)
+      if (!result.handled) logger.warn(`Ignored invalid selection picker action for ${action.open_message_id}`)
       return result.response ?? {}
     }
     if (actionType === "question_answer" || actionType === "permission_reply") {
@@ -460,6 +495,7 @@ async function main(): Promise<void> {
       interactiveCardRegistry.close()
       agentConsoleRegistry.close()
       fileBrowserRegistry.close()
+      selectionPickerRegistry.close()
       seenInteractiveIds.close()
       dedup.close()
       db.close()

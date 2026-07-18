@@ -76,6 +76,109 @@ describe("AgentConsoleSession", () => {
     expect(feishuClient.sendMessage).not.toHaveBeenCalled()
   })
 
+  it("renders bottom controls with three selectors and abort button", async () => {
+    const cardkitClient = createMockCardKitClient()
+    const feishuClient = createMockFeishuClient()
+    ;(feishuClient.replyMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      msg: "ok",
+      data: { message_id: "msg_456" },
+    })
+    const session = new AgentConsoleSession({
+      cardkitClient,
+      feishuClient,
+      chatId: "chat_789",
+      replyToMessageId: "msg_original",
+      controls: {
+        canAbort: true,
+        sessionId: "ses-1",
+        sessionTitle: "实现主卡控制区",
+        agentLabel: "build",
+        modelLabel: "anthropic:claude",
+        projectName: "opencode-lark",
+        branchName: "main",
+      },
+    })
+
+    await session.start()
+
+    const schema = cardkitClient.createCard.mock.calls[0]![0] as CardKitSchema
+    const serialized = JSON.stringify(schema.body.elements)
+    expect(schema.header?.title.content).toBe("🧠 飞码智能体 · opencode-lark#main")
+    expect(serialized).toContain("agentCtlHr")
+    expect(serialized).toContain("ses-1")
+    expect(serialized).toContain("实现主卡控制区")
+    expect(serialized).toContain("智能体")
+    expect(serialized).toContain("build")
+    expect(serialized).toContain("**当前上下文**：会话 `实现主卡控制区` · `ses-1` · 项目 `opencode-lark#main` · 智能体 `build` · 模型 `anthropic/claude`")
+    expect(serialized).toContain("**帮助**：")
+    expect(serialized).toContain("/agents")
+    expect(serialized).toContain("/models")
+    expect(serialized).toContain("/sessions")
+    expect(serialized).toContain("/files")
+    expect(serialized).toContain("/abort")
+    expect(serialized).toContain("/help")
+  })
+
+  it("keeps bottom controls when closing the streaming card", async () => {
+    const cardkitClient = createMockCardKitClient()
+    const feishuClient = createMockFeishuClient()
+    ;(feishuClient.replyMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      msg: "ok",
+      data: { message_id: "msg_456" },
+    })
+    const session = new AgentConsoleSession({
+      cardkitClient,
+      feishuClient,
+      chatId: "chat_789",
+      replyToMessageId: "msg_original",
+      controls: { canAbort: true, sessionId: "ses-1", sessionTitle: "Session 1" },
+    })
+
+    await session.start()
+    await session.close({ finalAnswer: "完成" })
+
+    const deletedIds = cardkitClient.deleteElement.mock.calls.map((call) => call[1])
+    expect(deletedIds).not.toContain("agentCtl")
+    expect(deletedIds).not.toContain("agentCtlInfo")
+    expect(deletedIds).not.toContain("agentCtlHr")
+  })
+
+  it("refreshes the footer when the actual model becomes available", async () => {
+    const cardkitClient = createMockCardKitClient()
+    const feishuClient = createMockFeishuClient()
+    ;(feishuClient.replyMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      code: 0,
+      msg: "ok",
+      data: { message_id: "msg_456" },
+    })
+    const session = new AgentConsoleSession({
+      cardkitClient,
+      feishuClient,
+      chatId: "chat_789",
+      replyToMessageId: "msg_original",
+      controls: { canAbort: true, sessionId: "ses-1", sessionTitle: "Session 1" },
+    })
+    await session.start()
+    const initial = JSON.stringify((cardkitClient.createCard.mock.calls[0]![0] as CardKitSchema).body.elements)
+    expect(initial).toContain("未知模型")
+
+    cardkitClient.updateElement.mockClear()
+    await session.setControls({
+      canAbort: true,
+      sessionId: "ses-1",
+      sessionTitle: "Session 1",
+      modelLabel: "anthropic:claude-sonnet-4",
+    })
+    expect(cardkitClient.updateElement).toHaveBeenCalledWith(
+      "card_123",
+      "agentCtlInfo",
+      expect.stringContaining("模型 `anthropic/claude-sonnet-4`"),
+      expect.any(Number),
+    )
+  })
+
   it("starts only once when called concurrently", async () => {
     const { session, cardkitClient, feishuClient } = createSession()
     let resolveCreate!: (cardId: string) => void

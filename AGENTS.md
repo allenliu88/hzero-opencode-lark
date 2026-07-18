@@ -4,7 +4,7 @@ Architecture guide for contributors. Covers module layout, key abstractions, dat
 
 ## What This Project Does
 
-`opencode-lark` bridges Feishu group chats with opencode TUI sessions. Messages sent in Feishu flow into opencode as if typed in the terminal. Agent replies stream back to Feishu — `StreamingBridge` accumulates `TextDelta` events and queues them into CardKit streaming card updates (with serialized delivery to avoid rate limits), while tool and sub-agent status are shown via separate CardKit cards.
+`opencode-lark` bridges Feishu group chats with opencode TUI sessions. Messages sent in Feishu flow into opencode as if typed in the terminal. Agent replies, tool status, and task timelines stream into one Agent Console CardKit card with serialized delivery; sub-agent discovery may additionally emit a separate navigation or notification card.
 
 ```
 Feishu client
@@ -28,7 +28,10 @@ src/
 ├── types.ts         Shared type definitions
 ├── channel/         ChannelPlugin interface, ChannelManager, FeishuPlugin
 ├── feishu/          Feishu REST client, CardKit, WebSocket, message dedup
+├── file-browser/    Read-only remote OpenCode workspace browser
 ├── handler/         MessageHandler (inbound pipeline) + StreamingBridge (SSE → cards)
+├── opencode/        Directory-scoped OpenCode control API adapter
+├── selection-picker/ Card JSON 2.0 Agent/Model/Session picker registry
 ├── session/         TUI session discovery, thread→session mapping, progress cards
 ├── streaming/       EventProcessor (SSE parsing), SessionObserver, SubAgentTracker
 ├── cron/            CronService (scheduled jobs) + HeartbeatService
@@ -60,15 +63,19 @@ All adapters except `config` are optional. Implement only what your channel need
 
 ### EventProcessor (`src/streaming/event-processor.ts`)
 
-Consumes the raw SSE stream from opencode and emits structured events: `TextDelta`, `SessionIdle`, `ToolStart`, `ToolEnd`, etc. Other services subscribe via `EventListenerMap`.
+Consumes the raw SSE stream from opencode and emits structured events such as `TextDelta`, `SessionIdle`, tool state changes, and `MessageModelResolved`. The model event carries the actual provider/model reported by User or Assistant messages so the Agent Console footer and persisted mapping stay accurate.
 
 ### SessionManager (`src/session/session-manager.ts`)
 
-Discovers live opencode TUI sessions for a working directory. Binds a Feishu thread key (chat ID + thread ID) to a specific session ID, persisting the mapping in SQLite so it survives restarts.
+Binds a Feishu thread key (chat ID + thread ID) to a specific OpenCode session and persists session/project/Agent/Model context in SQLite. New mappings create a clean session by default; optional TUI discovery is enabled only by `session.autoDiscoverTui`.
 
 ### StreamingBridge (`src/handler/streaming-integration.ts`)
 
-Buffers `TextDelta` events and queues them into CardKit streaming card updates (serialized to avoid rate limits). Sends the final text reply and closes the streaming card when `SessionIdle` fires. Tool and sub-agent status are shown via separate CardKit cards.
+Buffers `TextDelta` events and queues them into CardKit streaming card updates (serialized to avoid rate limits). It hydrates session, project, branch, and actual model context before creating the card, refreshes the footer when a newer message model arrives, and closes the streaming card when `SessionIdle` fires.
+
+### SelectionPickerRegistry (`src/selection-picker/selection-picker-registry.ts`)
+
+Owns Agent, Model, and Session picker cards. It uses eight-row in-place pagination, rotating view tokens, per-view action IDs for in-flight duplicate suppression, opaque entry keys, per-operator authorization, action serialization, TTL cleanup, and limited update retries. Picker data comes from directory-scoped OpenCode APIs that match the OpenCode Web application.
 
 ---
 
@@ -83,7 +90,7 @@ Feishu WebSocket
       → ChannelMessagingAdapter.normalizeInbound()
         → MessageHandler
           1. MessageDedup: skip if already seen
-          2. SessionManager: resolve or discover session
+          2. SessionManager: resolve/create session, with optional TUI discovery
           3. Inject Lark context signature (first message per session)
           4. HTTP POST to opencode /session/{id}/message
           5. Register SSE listener for this session

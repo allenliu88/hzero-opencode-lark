@@ -14,6 +14,7 @@ function createMockSessionManager(
     getExisting: vi.fn().mockResolvedValue(mapping?.session_id),
     deleteMapping: vi.fn().mockReturnValue(true),
     setMapping: vi.fn().mockReturnValue(true),
+    updateContext: vi.fn().mockReturnValue(true),
     cleanup: vi.fn().mockReturnValue(0),
     validateAndCleanupStale: vi.fn().mockResolvedValue(0),
   }
@@ -43,12 +44,18 @@ describe("createCommandHandler", () => {
     vi.clearAllMocks()
   })
 
-  function createHandler(sm?: SessionManager) {
+  function createHandler(
+    sm?: SessionManager,
+    opencodeControlClient?: Parameters<typeof createCommandHandler>[0]["opencodeControlClient"],
+    selectionPickerRegistry?: Parameters<typeof createCommandHandler>[0]["selectionPickerRegistry"],
+  ) {
     return createCommandHandler({
       serverUrl: "http://test:4096",
       sessionManager: sm ?? mockSessionManager,
       feishuClient: mockFeishuClient,
       logger: mockLogger,
+      opencodeControlClient,
+      selectionPickerRegistry,
     })
   }
 
@@ -70,7 +77,9 @@ describe("createCommandHandler", () => {
         body: JSON.stringify({ title: "Feishu chat chat-1" }),
       })
       expect(mockSessionManager.deleteMapping).toHaveBeenCalledWith("chat-1")
-      expect(mockSessionManager.setMapping).toHaveBeenCalledWith("chat-1", "ses-new")
+      expect(mockSessionManager.setMapping).toHaveBeenCalledWith("chat-1", "ses-new", undefined, {
+        sessionTitle: "Feishu chat chat-1",
+      })
       expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
         msg_type: "text",
         content: JSON.stringify({ text: "已创建并切换到新会话: ses-new" }),
@@ -128,90 +137,52 @@ describe("createCommandHandler", () => {
   })
 
   describe("/sessions", () => {
-    it("sends interactive card with session buttons", async () => {
-      vi.useFakeTimers()
-      const now = new Date("2026-03-14T12:00:00.000Z")
-      vi.setSystemTime(now)
-
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: "ses-1",
-              title: "Analysis report SSE timeout error",
-              time: {
-                created: now.getTime() - 10_000,
-                updated: now.getTime() - 3 * 60 * 60 * 1000,
-              },
-              summary: { additions: 1, deletions: 2, files: 363 },
-            },
-            {
-              id: "ses-2",
-              time: {
-                created: now.getTime() - 20_000,
-                updated: now.getTime() - 2 * 60 * 1000,
-              },
-            },
-          ]),
+    it("opens the shared sessions picker", async () => {
+      const selectionPickerRegistry = { open: vi.fn().mockResolvedValue(undefined) }
+      const handler = createHandler(undefined, undefined, selectionPickerRegistry as any)
+      expect(await handler("chat-1", "chat-1", "msg-1", "/sessions", "user-1")).toBe(true)
+      expect(selectionPickerRegistry.open).toHaveBeenCalledWith({
+        kind: "sessions", feishuKey: "chat-1", chatId: "chat-1", replyToMessageId: "msg-1", operatorOpenId: "user-1",
       })
-      mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
-
-      const handler = createHandler()
-      const result = await handler("chat-1", "chat-1", "msg-1", "/sessions")
-
-      expect(result).toBe(true)
-      expect(mockFetch).toHaveBeenCalledWith("http://test:4096/session")
-      expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
-        msg_type: "interactive",
-        content: expect.any(String),
-      })
-      // Verify card structure
-      const callArgs = (mockFeishuClient.replyMessage as any).mock.calls[0]
-      const content = JSON.parse(callArgs?.[1]?.content as string)
-      expect(content).toHaveProperty("config")
-      expect(content).toHaveProperty("header")
-      expect(content).toHaveProperty("elements")
-      expect(content.header?.title?.content).toContain("选择会话")
-      // Verify buttons are created for each session
-      const actionElements = content.elements?.filter((e: any) => e.tag === "action")
-      // 2 from API + 1 current session (ses-123) not in API list → prepended
-      expect(actionElements).toHaveLength(3)
-
-      const buttonTexts = actionElements.map((el: any) => el.actions?.[0]?.text?.content)
-      expect(buttonTexts[0]).toBe("▶ 当前会话 · 刚刚")
-      expect(buttonTexts[1]).toBe("Analysis report SSE timeout... · 3小时前 · 363文件")
-      expect(buttonTexts[2]).toBe("未命名会话 · 2分钟前")
-
-      for (const t of buttonTexts) {
-        expect(t).not.toContain("ses-")
-      }
-
-      vi.useRealTimers()
     })
 
-    it("replies with text when no sessions exist", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve([]),
-      })
+    it("rejects opening a picker when operator identity is unavailable", async () => {
+      const selectionPickerRegistry = { open: vi.fn() }
       mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
-
-      const handler = createHandler()
+      const handler = createHandler(undefined, undefined, selectionPickerRegistry as any)
       const result = await handler("chat-1", "chat-1", "msg-1", "/sessions")
-
       expect(result).toBe(true)
+      expect(selectionPickerRegistry.open).not.toHaveBeenCalled()
       expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
         msg_type: "text",
-        content: JSON.stringify({ text: "暂无会话。" }),
+        content: JSON.stringify({ text: "无法确认操作用户，不能打开选择器。" }),
       })
+    })
+  })
+
+  describe("/agents and /models", () => {
+    it("opens the shared agents picker", async () => {
+      const selectionPickerRegistry = { open: vi.fn().mockResolvedValue(undefined) }
+      const handler = createHandler(undefined, undefined, selectionPickerRegistry as any)
+      expect(await handler("chat-1", "chat-1", "msg-1", "/agents", "user-1")).toBe(true)
+      expect(selectionPickerRegistry.open).toHaveBeenCalledWith(expect.objectContaining({ kind: "agents", operatorOpenId: "user-1" }))
+    })
+
+    it("opens the shared models picker", async () => {
+      const selectionPickerRegistry = { open: vi.fn().mockResolvedValue(undefined) }
+      const handler = createHandler(undefined, undefined, selectionPickerRegistry as any)
+      expect(await handler("chat-1", "chat-1", "msg-1", "/models", "user-1")).toBe(true)
+      expect(selectionPickerRegistry.open).toHaveBeenCalledWith(expect.objectContaining({ kind: "models", operatorOpenId: "user-1" }))
     })
   })
 
   describe("/connect", () => {
     it("connects to a valid session", async () => {
       mockFetch
-        .mockResolvedValueOnce({ ok: true })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ title: "Target Session", directory: "/repo/opencode-lark" }),
+        })
         .mockResolvedValueOnce({ ok: true })
       mockFeishuClient.replyMessage = vi.fn().mockResolvedValue({ code: 0, msg: "ok" })
 
@@ -224,7 +195,12 @@ describe("createCommandHandler", () => {
       // deleteMapping called
       expect(mockSessionManager.deleteMapping).toHaveBeenCalledWith("chat-1")
       // setMapping called
-      expect(mockSessionManager.setMapping).toHaveBeenCalledWith("chat-1", "ses-456")
+      expect(mockSessionManager.setMapping).toHaveBeenCalledWith("chat-1", "ses-456", undefined, {
+        sessionTitle: "Target Session",
+        directory: "/repo/opencode-lark",
+        projectName: "opencode-lark",
+        branchName: null,
+      })
       expect(mockFeishuClient.replyMessage).toHaveBeenCalledWith("msg-1", {
         msg_type: "text",
         content: JSON.stringify({ text: "已连接到会话: ses-456" }),

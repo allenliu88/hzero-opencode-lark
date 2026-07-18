@@ -67,6 +67,42 @@ export function buildInteractiveCallbackResponse(
     }
   }
 
+  if (actionType?.startsWith("selection_picker_")) {
+    return { toast: { type: "info", content: "已收到选择请求" } }
+  }
+
+  if (actionType === "agent_console_switch_agent") {
+    return { toast: { type: "success", content: "已切换智能体，将在下一次消息生效" } }
+  }
+
+  if (actionType === "agent_console_switch_model") {
+    return { toast: { type: "success", content: "已切换模型，将在下一次消息生效" } }
+  }
+
+  if (actionType === "agent_console_switch_project") {
+    return { toast: { type: "success", content: "已切换项目，将在下一次消息生效" } }
+  }
+
+  if (actionType === "agent_console_select_session") {
+    return { toast: { type: "success", content: "已切换会话，将在下一次消息生效" } }
+  }
+
+  if (actionType === "agent_console_abort") {
+    return { toast: { type: "success", content: "已发送中止请求" } }
+  }
+
+  if (actionType === "agent_console_open_session_picker") {
+    return { toast: { type: "info", content: "请发送 /sessions 选择会话" } }
+  }
+
+  if (
+    actionType === "agent_console_open_agent_picker" ||
+    actionType === "agent_console_open_model_picker" ||
+    actionType === "agent_console_open_project_picker"
+  ) {
+    return { toast: { type: "info", content: "切换选择器即将打开" } }
+  }
+
   return {}
 }
 
@@ -87,11 +123,15 @@ export function buildCommandSelectedCard(command: string): Record<string, unknow
 function commandDisplayName(command: string): string {
   if (command === "/new") return "新建会话"
   if (command === "/sessions") return "连接会话"
+  if (command === "/agents") return "切换智能体"
+  if (command === "/models") return "切换模型"
   if (command === "/files") return "浏览文件"
   if (command === "/abort") return "中止任务"
   if (command === "/test-loading") return "Loading 测试"
   if (command === "/test-loading-v2") return "Loading 2.0"
   if (command.startsWith("/connect ")) return "连接会话"
+  if (command.startsWith("/agent ")) return "切换智能体"
+  if (command.startsWith("/model ")) return "切换模型"
   return command
 }
 

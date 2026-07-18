@@ -14,11 +14,15 @@ Core inbound pipeline. Receives normalized messages from `FeishuPlugin`, then:
 6. Kicks off `StreamingBridge` to listen for the response
 7. Calls `sendDetectedFiles` via `outbound-media.ts` once the session goes idle
 ### `command-handler.ts`
-Handles slash commands typed in Feishu: `/new`, `/sessions`, `/connect`, `/files`, `/compact`, `/share`, `/abort`, `/help`.
+Handles slash commands typed in Feishu: `/new`, `/sessions`, `/connect`, `/agents`, `/agent`, `/models`, `/model`, `/files`, `/abort`, `/help`, plus internal loading-test commands.
 
-Key detail: the currently connected session is pinned at the top of the `/sessions` list regardless of API ordering. Sessions are displayed as interactive cards with clickable buttons to connect.
+`/sessions`, `/agents`, and `/models` delegate to `SelectionPickerRegistry`. The current session is pinned at the top; all three pickers use Card JSON 2.0 full-width rows and eight-row in-place pagination.
 
 `/files` is read-only and uses `SessionManager.getExisting()` so browsing never creates a new OpenCode session. It delegates remote file access and card navigation to `src/file-browser/`.
+
+The typed `/abort` command calls the global `/session/{sessionID}/abort` endpoint directly. `OpencodeControlClient.abortSession()` separately supports project-scoped abort with a global fallback for Agent Console compatibility paths.
+
+Card-menu `command_execute` callbacks currently use the chat ID as a best-effort mapping key. This is correct for p2p chats but does not preserve the full group-topic thread key; typed slash commands are the reliable path in topics.
 
 ### `outbound-media.ts`
 Detects file paths in agent response text using regex, then uploads matching files back to Feishu as images or attachments.
@@ -37,6 +41,7 @@ SSE-to-CardKit bridge (also called `StreamingBridge` in the root docs).
 - Accumulates `TextDelta` chunks via queue-based serialization to prevent rate-limit issues
 - On `SessionIdle`: flushes the final card, then calls `sendDetectedFiles` to trigger outbound media upload
 - On `ToolStart`/`ToolEnd`: updates the progress card via `ProgressTracker`
+- Hydrates Session/VCS context and synchronizes eligible provider/model updates from `message.updated` events into the mapping and Agent Console footer in event-arrival order
 
 ### `interactive-handler.ts`
 Handles card action callbacks (button clicks). Currently serves permission approval cards and question/clarification cards. Receives POSTs from the webhook server and translates them into opencode API calls or session commands.

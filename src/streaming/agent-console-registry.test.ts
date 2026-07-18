@@ -37,4 +37,31 @@ describe("AgentConsoleRegistry", () => {
     await expect(registry.handle(action("agent_console_back"))).resolves.toBe(false)
     vi.useRealTimers()
   })
+
+  it("routes control actions only when selected options are registered", async () => {
+    const registry = new AgentConsoleRegistry()
+    const target = {
+      chatId: "chat-1",
+      agentOptions: new Set(["build"]),
+      modelOptions: new Set(["anthropic:claude-sonnet-4"]),
+      projectOptions: new Set(["proj-1"]),
+      viewTask: vi.fn(),
+      viewParent: vi.fn(),
+      switchAgent: vi.fn(),
+      switchModel: vi.fn(),
+      switchProject: vi.fn(),
+      abort: vi.fn(),
+    }
+    registry.register("msg-card", target)
+
+    await expect(registry.handle({ ...action("agent_console_switch_agent"), action: { tag: "select_static", value: { action: "agent_console_switch_agent" }, option: "build" } })).resolves.toBe(true)
+    expect(target.switchAgent).toHaveBeenCalledWith("build")
+    await expect(registry.handle({ ...action("agent_console_switch_model"), action: { tag: "select_static", value: { action: "agent_console_switch_model" }, option: "anthropic:claude-sonnet-4" } })).resolves.toBe(true)
+    expect(target.switchModel).toHaveBeenCalledWith("anthropic", "claude-sonnet-4")
+    await expect(registry.handle({ ...action("agent_console_switch_project"), action: { tag: "select_static", value: { action: "agent_console_switch_project" }, option: "proj-1" } })).resolves.toBe(true)
+    expect(target.switchProject).toHaveBeenCalledWith("proj-1")
+    await expect(registry.handle(action("agent_console_abort"))).resolves.toBe(true)
+    expect(target.abort).toHaveBeenCalledOnce()
+    await expect(registry.handle({ ...action("agent_console_switch_agent"), action: { tag: "select_static", value: { action: "agent_console_switch_agent" }, option: "unknown" } })).resolves.toBe(false)
+  })
 })

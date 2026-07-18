@@ -29,13 +29,14 @@ OPENCODE_SERVER_URL=http://0.0.0.0:54096 bun run start ## 生产模式
 - **实时桥接** — 飞书消息即时出现在 opencode TUI，agent 回复以动态卡片形式推送回飞书。
 - **交互式卡片** — agent 的提问和权限请求以可点击的飞书卡片呈现，直接在聊天中回答或审批，无需切换到 TUI。
 - **WebSocket 长连接** — 采用飞书 WebSocket 长连接模式，无需公网 IP，无需轮询。
-- **SSE 流式输出** — 订阅 opencode SSE 事件流，防抖处理卡片更新，避免触发频率限制。
-- **对话记忆** — SQLite 存储每个会话的对话历史，每次消息自动携带上下文。
-- **Session 自动发现** — 自动发现并绑定当前目录的最新 TUI session，重启后映射关系持久保存。
+- **SSE 流式输出** — 订阅 opencode SSE 事件流，串行合并卡片更新，避免触发频率限制。
+- **对话连续性** — SQLite 持久化每个飞书会话或话题绑定的 OpenCode session；对话历史由 OpenCode session 保存，不额外拼接本地对话副本。
+- **干净 Session 绑定** — 新飞书映射默认创建干净 OpenCode session；可通过 `/sessions`、`/connect` 显式绑定已有会话，也可开启旧版 TUI 自动发现。
 - **优雅重连** — 启动时指数退避重连 opencode server，最多重试 10 次，无需手动等待 server 就绪。
 - **可扩展渠道层** — `ChannelPlugin` 接口设计，可扩展接入 Slack、Discord 等其他平台，无需修改核心逻辑。
 - **文件与图片支持** — 支持飞书图片和文件消息（不限于文字）。附件下载保存至 `${OPENCODE_CWD}/.opencode-lark/attachments/`，并将本地路径传给 opencode 供其读取分析。支持流式下载，50 MB 大小限制，文件名安全处理。
 - **远程文件浏览器** — 使用 `/files` 或 `/files src` 浏览当前 OpenCode 会话所在服务器的项目目录，并在分页交互卡片中预览文本文件，无需调用模型。
+- **运行上下文面板** — 主卡底部显示当前会话、项目分支、智能体和本轮实际 `providerID/modelID`；`/agents`、`/models`、`/sessions` 使用安全的 8 行分页选择卡切换后续消息上下文。
 
 ---
 
@@ -55,9 +56,9 @@ opencode TUI
 
 > `opencode serve` 运行 HTTP server，在另一个终端用 `opencode attach` 查看 TUI 会话。
 
-**入站（飞书 → TUI）：** 飞书通过 WebSocket 发送消息，opencode-lark 标准化处理后找到绑定的 session，拼接对话历史，POST 到 opencode API。TUI 即时收到消息。
+**入站（飞书 → TUI）：** 飞书通过 WebSocket 发送消息，opencode-lark 标准化处理后找到绑定的 OpenCode session，并在存在时携带持久化的 Agent/Model 覆盖字段 POST 到 OpenCode。会话历史由 OpenCode session 自身维护。
 
-**出站（TUI → 飞书）：** opencode-lark 订阅 opencode SSE 流。agent 输出文字时，`TextDelta` 事件累积并触发防抖卡片更新。`SessionIdle` 到达后，最终卡片推送到飞书。
+**出站（TUI → 飞书）：** opencode-lark 订阅 opencode SSE 流。agent 输出文字时，`TextDelta` 事件累积，并将最新卡片状态串行合并为受限频率的更新。`SessionIdle` 到达后，最终卡片推送到飞书。
 
 ### 支持的消息类型
 
@@ -76,6 +77,14 @@ opencode TUI
 发送 `/files` 可浏览当前飞书会话或话题所绑定 OpenCode session 的项目根目录；发送 `/files src` 可从项目内指定目录开始。目录导航和文件分页都在同一张 Card JSON 2.0 卡片中更新，默认只有创建卡片的用户可以操作。目录项使用 `📁`、`📄` 图标和全宽可点击名称；上一级、根目录、刷新和分页操作固定在同一个不换行操作区。
 
 浏览器为只读模式，以每页最多 60 行预览不超过 1 MiB 的文本文件，并默认拦截 `.env`、私钥和证书等常见敏感文件。文件通过 OpenCode Server 文件 API 读取，因此来自 OpenCode 服务器主机，而不是 `opencode-lark` 所在主机。交互导航需要订阅 `card.action.trigger` 回调。每版卡片使用短期视图令牌和幂等动作 ID；OpenCode 请求有明确超时，飞书卡片更新使用有限重试。
+
+### 运行上下文与选择器
+
+飞码智能体主卡底部显示会话名称和 ID、项目与分支、智能体，以及本轮实际使用的 `providerID/modelID`。实际模型优先从本轮 OpenCode message 事件解析，并实时更新主卡；其次使用 Session API 和持久化 mapping，无法确定时显示“未知模型”。帮助行包含 `/agents`、`/models`、`/sessions`、`/files`、`/abort` 和 `/help`。
+
+发送 `/agents`、`/models` 或 `/sessions` 会打开独立的 Card JSON 2.0 选择卡。每页最多 8 行，上一页和下一页在原卡更新；只有创建卡片的用户可以操作。Agent 列表排除隐藏和 subagent 项，Model 始终排除废弃模型；OpenCode 返回 `connected` 列表时同时排除未连接 Provider，旧响应缺少该字段时保留全部可解析 Provider。Session 列表只展示当前目录未归档的根会话。仍可直接使用 `/agent {id}` 和 `/model {provider}:{model}`。
+
+群话题中请直接输入 slash command。命令菜单卡片回调当前只能以 chat ID 作为 best-effort mapping key，而直接输入命令会保留完整的话题/thread key。
 
 ---
 
@@ -146,15 +155,13 @@ opencode-lark
 
 **4. 发送测试消息**
 
-向飞书机器人发送任意消息。首次联系时自动发现最新 TUI session 并回复：
+向飞书机器人发送任意消息。首次联系时，opencode-lark 默认为该飞书会话或话题创建干净 OpenCode session。使用 `/sessions` 或 `/connect {session_id}` 可绑定已有会话；如需恢复旧版“自动发现最新 TUI session”行为，将 `session.autoDiscoverTui` 设置为 `true`，默认值为 `false`。
 
-> Connected to session: ses_xxxxx
-
-首次消息后飞书收到 session 绑定通知，之后双向消息互通。要在 TUI 中查看：
+从日志或 `/sessions` 获得 session ID 后，可在 TUI 中查看：
 ```bash
 opencode attach http://127.0.0.1:4096 --session {session_id}
 ```
-`session_id` 会在 opencode-lark 启动日志中显示（如 `Bound to TUI session: ... → ses_xxxxx`）。
+开启自动发现时，日志也会显示绑定信息（如 `Bound to TUI session: ... → ses_xxxxx`）。
 
 ---
 
@@ -269,7 +276,7 @@ opencode attach http://127.0.0.1:4096 --session {session_id}
 | 机器人收不到消息 | 未开启长连接或事件未订阅 | 检查事件订阅，确认选择长连接模式 |
 | 凭证错误 | `.env` 中凭证有误 | 从步骤 3 重新确认 App ID 和 App Secret |
 | 收到消息但无回复 | opencode server 未启动 | 确保先启动 opencode server：`OPENCODE_SERVER_PORT=4096 opencode serve` |
-| 卡片不实时更新 | 频率限制或防抖延迟 | 正常行为，防抖处理避免触发频率限制 |
+| 卡片不实时更新 | 频率限制或更新间隔 | 正常行为，卡片更新按最小间隔串行合并 |
 | 点击卡片按钮报错 `200340` | 回调订阅未配置 | 进入**回调订阅** → 选择长连接 → 添加 `card.action.trigger` |
 | 保存长连接模式时报"应用未建立长连接" | 应用未启动，飞书要求先建立连接 | 先完成步骤 6 启动 opencode-lark，再回飞书后台保存设置 |
 
@@ -308,6 +315,11 @@ opencode attach http://127.0.0.1:4096 --session {session_id}
   // 常见值："build"、"claude"、"code" — 请查看你的 opencode 配置。
   "defaultAgent": "build",
   "dataDir": "./data",
+  "session": {
+    // false：新飞书映射创建干净 session。
+    // true：恢复针对 OPENCODE_CWD 的最新 TUI session 自动发现。
+    "autoDiscoverTui": false
+  },
   "progress": {
     "debounceMs": 500,
     "maxDebounceMs": 3000
@@ -327,10 +339,12 @@ src/
 ├── types.ts         # 共享类型定义
 ├── channel/         # ChannelPlugin 接口、ChannelManager、FeishuPlugin
 ├── feishu/          # 飞书 REST 客户端、CardKit、WebSocket、消息去重
+├── file-browser/    # 远程 OpenCode 工作区浏览器
 ├── handler/         # MessageHandler（入站管道）+ StreamingBridge（SSE → 卡片）
+├── opencode/        # 目录级 OpenCode 控制 API 适配层
+├── selection-picker/ # Agent/Model/Session 选择器 registry
 ├── session/         # TUI session 发现、thread→session 映射、进度卡片
 ├── streaming/       # EventProcessor（SSE 解析）、SessionObserver、SubAgentTracker
-├── memory/          # SQLite 驱动的会话级对话记忆
 ├── cron/            # CronService（定时任务）+ HeartbeatService
 └── utils/           # 配置加载、日志、SQLite 初始化、EventListenerMap
 ```

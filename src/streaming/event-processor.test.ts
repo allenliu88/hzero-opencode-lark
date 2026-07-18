@@ -13,6 +13,45 @@ function makeProcessor(sessions: string[] = ["ses-1"]) {
 }
 
 describe("EventProcessor", () => {
+  it("emits the actual model from user and assistant messages", () => {
+    const proc = makeProcessor()
+    expect(proc.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user-msg",
+          sessionID: "ses-1",
+          role: "user",
+          model: { providerID: "anthropic", modelID: "claude-sonnet-4" },
+        },
+      },
+    })).toEqual({
+      type: "MessageModelResolved",
+      sessionId: "ses-1",
+      messageId: "user-msg",
+      providerId: "anthropic",
+      modelId: "claude-sonnet-4",
+    })
+    expect(proc.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "assistant-msg",
+          sessionID: "ses-1",
+          role: "assistant",
+          providerID: "openai",
+          modelID: "gpt-5",
+        },
+      },
+    })).toEqual({
+      type: "MessageModelResolved",
+      sessionId: "ses-1",
+      messageId: "assistant-msg",
+      providerId: "openai",
+      modelId: "gpt-5",
+    })
+  })
+
   it("filters text parts belonging to a user message", () => {
     const proc = makeProcessor()
     expect(proc.processEvent({

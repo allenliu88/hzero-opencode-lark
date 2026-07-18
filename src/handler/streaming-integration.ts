@@ -8,11 +8,15 @@ import type { QuestionAsked, PermissionRequested } from "../streaming/event-proc
 import type { EventListenerMap } from "../utils/event-listeners.js"
 import { addListener, removeListener } from "../utils/event-listeners.js"
 import { AgentConsoleSession, ANSWER_ELEMENT_MAX_BYTES } from "../streaming/agent-console.js"
+import type { AgentConsoleControls } from "../streaming/agent-console.js"
 import type { OutboundMediaHandler } from "./outbound-media.js"
 import type { ExpiringSet } from "../utils/expiring-set.js"
 import type { InteractiveCardRegistry } from "../feishu/interactive-card-registry.js"
 import type { EmbeddedInteractionRegistry } from "../feishu/embedded-interaction-registry.js"
 import type { AgentConsoleRegistry } from "../streaming/agent-console-registry.js"
+import type { SessionManager } from "../session/session-manager.js"
+import type { OpencodeControlClient } from "../opencode/control-client.js"
+import type { SelectionPickerRegistry } from "../selection-picker/selection-picker-registry.js"
 import {
   extractFeishuMessageId,
   interactiveCardKey,
@@ -32,6 +36,9 @@ export interface StreamingBridgeDeps {
   activeSessions?: Set<string>
   ownedSessions?: Set<string>
   agentConsoleRegistry?: AgentConsoleRegistry
+  sessionManager?: SessionManager
+  opencodeControlClient?: OpencodeControlClient
+  selectionPickerRegistry?: SelectionPickerRegistry
   outboundMedia?: OutboundMediaHandler
   inactivityTimeoutMs?: number
   waitingInactivityTimeoutMs?: number
@@ -51,6 +58,7 @@ export interface StreamingBridge {
     messageId: string,
     reactionId: string | null,
     requestText?: string,
+    feishuKey?: string,
   ): Promise<void>
 }
 
@@ -92,6 +100,7 @@ export function createStreamingBridge(
       messageId: string,
       reactionId: string | null,
       requestText?: string,
+      feishuKey?: string,
     ): Promise<void> {
       const previous = sessionTails.get(sessionId) ?? Promise.resolve()
       let release!: () => void
@@ -116,25 +125,27 @@ export function createStreamingBridge(
 
       const ensureCard = (): Promise<void> => {
         if (cardStartPromise) return cardStartPromise
-        card = new AgentConsoleSession({
-          cardkitClient,
-          feishuClient,
-          chatId,
-          replyToMessageId: messageId,
-          requestText,
-        })
-        cardStartPromise = card.start()
+        cardStartPromise = (async () => {
+          const mapping = await resolveAgentConsoleMapping(
+            sessionId,
+            feishuKey,
+            deps.sessionManager,
+            deps.opencodeControlClient,
+          )
+          card = new AgentConsoleSession({
+            cardkitClient,
+            feishuClient,
+            chatId,
+            replyToMessageId: messageId,
+            requestText,
+            controls: buildAgentConsoleControls(mapping, true),
+          })
+          await card.start()
+        })()
           .then(() => {
             const cardMessageId = card?.cardMessageId
             if (cardMessageId && deps.agentConsoleRegistry) {
-              deps.agentConsoleRegistry.register(cardMessageId, {
-                chatId,
-                viewTask: async (taskKey) => {
-                  const childSessionId = taskChildren.get(taskKey)
-                  if (childSessionId) await card?.viewChild(childSessionId)
-                },
-                viewParent: async () => card?.viewParent(),
-              })
+              registerAgentConsoleTarget(cardMessageId)
             }
             logger.info(
               `Streaming card started for session ${sessionId} in chat ${chatId}`,
@@ -146,6 +157,74 @@ export function createStreamingBridge(
             throw err
           })
         return cardStartPromise
+      }
+
+      const registerAgentConsoleTarget = (
+        cardMessageId: string,
+      ): void => {
+        deps.agentConsoleRegistry?.register(cardMessageId, {
+          chatId,
+          viewTask: async (taskKey) => {
+            const childSessionId = taskChildren.get(taskKey)
+            if (childSessionId) await card?.viewChild(childSessionId)
+          },
+          viewParent: async () => card?.viewParent(),
+          openSessionPicker: async (sourceMessageId, operatorOpenId) => openPicker("sessions", sourceMessageId, operatorOpenId),
+          openAgentPicker: async (sourceMessageId, operatorOpenId) => openPicker("agents", sourceMessageId, operatorOpenId),
+          openModelPicker: async (sourceMessageId, operatorOpenId) => openPicker("models", sourceMessageId, operatorOpenId),
+          selectSession: async (targetSessionId) => {
+            if (!feishuKey || !deps.sessionManager) return
+            const session = await fetchSessionInfo(targetSessionId)
+            deps.sessionManager.setMapping(feishuKey, targetSessionId, undefined, {
+              sessionTitle: session?.title ?? null,
+              directory: session?.directory ?? null,
+              projectName: basename(session?.directory) ?? null,
+            })
+          },
+          switchAgent: async (agentId) => {
+            if (!feishuKey) return
+            deps.sessionManager?.updateContext(feishuKey, { agent: agentId })
+          },
+          switchModel: async (providerId, modelId) => {
+            if (!feishuKey) return
+            deps.sessionManager?.updateContext(feishuKey, { providerId, modelId })
+          },
+          switchProject: async (projectId) => {
+            if (!feishuKey || !deps.sessionManager || !deps.opencodeControlClient) return
+            const directory = (await deps.opencodeControlClient.listProjectDirectories(projectId).catch(() => []))[0]
+            const sessions = await deps.opencodeControlClient.listProjectSessions(projectId).catch(() => [])
+            const matched = sessions
+              .filter((session) => !directory || session.directory === directory)
+              .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))[0]
+            const projectSession = matched
+              ? { sessionId: matched.id, directory: matched.directory ?? directory }
+              : await deps.opencodeControlClient.createProjectSession(projectId, directory)
+            deps.sessionManager.updateContext(feishuKey, {
+              sessionId: projectSession.sessionId,
+              projectId,
+              directory: projectSession.directory ?? directory ?? null,
+            })
+          },
+          abort: async () => {
+            const current = feishuKey ? deps.sessionManager?.getSession(feishuKey) : null
+            await deps.opencodeControlClient?.abortSession({
+              sessionId: current?.session_id ?? sessionId,
+              projectId: current?.project_id,
+            })
+          },
+        })
+      }
+
+      const openPicker = async (kind: "sessions" | "agents" | "models", sourceMessageId: string, operatorOpenId: string): Promise<void> => {
+        if (!feishuKey || !deps.selectionPickerRegistry) return
+        await deps.selectionPickerRegistry.open({ kind, feishuKey, chatId, replyToMessageId: sourceMessageId, operatorOpenId })
+      }
+
+      const fetchSessionInfo = async (targetSessionId: string): Promise<{ id: string; title?: string; directory?: string } | null> => {
+        if (!deps.serverUrl) return null
+        const resp = await fetch(`${deps.serverUrl}/session/${encodeURIComponent(targetSessionId)}`).catch(() => null)
+        if (!resp?.ok) return null
+        return await resp.json().catch(() => null) as { id: string; title?: string; directory?: string } | null
       }
 
       try {
@@ -324,6 +403,21 @@ export function createStreamingBridge(
           resetInactivityTimer()
 
           switch (action.type) {
+            case "MessageModelResolved": {
+              if (feishuKey && deps.sessionManager) {
+                deps.sessionManager.updateContext(feishuKey, {
+                  providerId: action.providerId,
+                  modelId: action.modelId,
+                })
+                const mapping = deps.sessionManager.getSession(feishuKey)
+                if (card && mapping) {
+                  card.setControls(buildAgentConsoleControls(mapping, true)).catch((err) => {
+                    logger.warn(`actual model context update failed: ${err}`)
+                  })
+                }
+              }
+              break
+            }
             case "TextDelta": {
               if (boundMessageId === null) {
                 boundMessageId = action.messageId
@@ -649,6 +743,65 @@ function parseSyncResponse(rawText: string, logger: Logger): string {
     logger.warn(`Failed to parse sync response: ${e}`)
     return stripThinkingContent(rawText).trim() || "（无回复）"
   }
+}
+
+function buildAgentConsoleControls(
+  mapping: {
+    session_id?: string
+    agent?: string
+    project_id?: string | null
+    directory?: string | null
+    provider_id?: string | null
+    model_id?: string | null
+    session_title?: string | null
+    project_name?: string | null
+    branch_name?: string | null
+  } | null | undefined,
+  canAbort: boolean,
+): AgentConsoleControls | undefined {
+  if (!mapping && !canAbort) return undefined
+  const modelLabel = mapping?.provider_id && mapping.model_id
+    ? `${mapping.provider_id}:${mapping.model_id}`
+    : undefined
+  return {
+    canAbort,
+    sessionId: mapping?.session_id,
+    sessionTitle: mapping?.session_title ?? undefined,
+    agentLabel: mapping?.agent,
+    modelLabel,
+    projectName: mapping?.project_name ?? basename(mapping?.directory) ?? undefined,
+    branchName: mapping?.branch_name ?? undefined,
+  }
+}
+
+async function resolveAgentConsoleMapping(
+  sessionId: string,
+  feishuKey: string | undefined,
+  sessionManager: SessionManager | undefined,
+  controlClient: OpencodeControlClient | undefined,
+): Promise<ReturnType<SessionManager["getSession"]>> {
+  let mapping = feishuKey ? sessionManager?.getSession(feishuKey) ?? null : null
+  if (!controlClient) return mapping
+  const session = await controlClient.getSession(sessionId).catch(() => null)
+  const directory = mapping?.directory ?? session?.directory
+  const vcs = directory && !mapping?.branch_name
+    ? await controlClient.getVcs(directory).catch((): { branch?: string } => ({}))
+    : {} as { branch?: string }
+  if (feishuKey && sessionManager && (session?.directory || session?.title || session?.model || vcs.branch)) {
+    sessionManager.updateContext(feishuKey, {
+      ...(session?.directory ? { directory: session.directory, projectName: basename(session.directory) ?? null } : {}),
+      ...(session?.title ? { sessionTitle: session.title } : {}),
+      ...(session?.model ? { providerId: session.model.providerId, modelId: session.model.modelId } : {}),
+      ...(vcs.branch ? { branchName: vcs.branch } : {}),
+    })
+    mapping = sessionManager.getSession(feishuKey)
+  }
+  return mapping
+}
+
+function basename(path: string | null | undefined): string | undefined {
+  if (!path) return undefined
+  return path.split("/").filter(Boolean).at(-1) ?? path
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
